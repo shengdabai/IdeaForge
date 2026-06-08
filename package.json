@@ -1,0 +1,39 @@
+{
+  "name": "ideaforge",
+  "version": "1.0.0",
+  "description": "Turn any idea, link, or image into a self-contained, visual knowledge page — locally, with the AI engine of your choice. 把想法/链接/图片一键炼成自包含可视化 HTML 深度页,全本地、可检索。",
+  "type": "module",
+  "bin": {
+    "forge": "engine/forge.mjs"
+  },
+  "scripts": {
+    "forge": "node engine/forge.mjs",
+    "serve": "node engine/forge.mjs serve",
+    "test": "node engine/forge.mjs --self-test"
+  },
+  "keywords": [
+    "knowledge-management",
+    "ai",
+    "html",
+    "visualization",
+    "local-first",
+    "cli",
+    "codex",
+    "claude",
+    "ollama",
+    "second-brain"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "engine/",
+    "templates/",
+    "index.html",
+    "profile.md",
+    "install.sh",
+    "start-dashboard.command",
+    "SPEC.md"
+  ]
+}

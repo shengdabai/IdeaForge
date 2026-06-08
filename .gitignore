@@ -1,0 +1,28 @@
+# --- IdeaForge: keep the engine public, keep your knowledge private ---
+
+# Generated pages and their index (your personal knowledge base)
+/pages/
+/pages.json
+/pages.json.bak*
+
+# Ingested raw material (urls/images/text you fed in)
+/inputs/
+
+# Your real profile — copy profile.md, fill it in, keep it out of git if private
+/profile.local.md
+
+# Secrets & local env (the engine reads keys from your environment, never from repo)
+.env
+.env.*
+*.key
+*.pem
+
+# Tooling / OS / editor noise
+/.omc/
+node_modules/
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Keep an empty pages.json placeholder tracked? No — dashboard creates it on first run.

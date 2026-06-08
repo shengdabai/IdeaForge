@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>想法工坊 · IdeaForge</title>
+<style>
+  :root{--bg:#0d0e12;--card:#181a22;--card2:#1e2129;--line:#262a35;--ink:#e8eaf0;
+    --ink2:#a7adbd;--ink3:#6f7689;--acc:#7c9cff;--acc2:#5ad1c4;--warn:#f3c66b;--r:16px;
+    --sans:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;--serif:"Songti SC",serif}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:radial-gradient(1200px 600px at 80% -10%,#1a1d29,var(--bg) 55%);color:var(--ink);
+    font-family:var(--sans);line-height:1.7;min-height:100vh;padding:0 0 100px}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+  header{padding:58px 0 30px;border-bottom:1px solid var(--line);margin-bottom:32px}
+  .kicker{font-size:13px;letter-spacing:.14em;color:var(--acc);text-transform:uppercase;font-weight:600}
+  h1{font-family:var(--serif);font-size:clamp(32px,5vw,48px);margin:14px 0 12px;
+    background:linear-gradient(180deg,#fff,#b9c0d4);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--ink2);font-size:17px;max-width:720px}
+  .composer{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:20px;margin:30px 0 16px}
+  .composer textarea,.search input{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:12px;
+    color:var(--ink);font-family:var(--sans);font-size:15px;padding:14px;outline:none}
+  .composer textarea{resize:vertical;min-height:84px}
+  .composer textarea:focus,.search input:focus{border-color:var(--acc)}
+  .row{display:flex;gap:12px;align-items:center;margin-top:12px;flex-wrap:wrap}
+  .hint{color:var(--ink3);font-size:13px;flex:1;min-width:180px}
+  select,button{font-family:var(--sans);font-size:14px;border-radius:10px;border:1px solid var(--line);padding:10px 16px}
+  select{background:var(--card2);color:var(--ink)}
+  button{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#0a0a0a;font-weight:700;border:none;cursor:pointer}
+  button.secondary{background:transparent;color:var(--ink2);border:1px solid var(--line)}
+  button.small{font-size:12.5px;padding:7px 11px;border-radius:8px}
+  button:active{transform:translateY(1px)}
+  .note{font-size:12.5px;color:var(--ink3);margin-top:10px}
+  .tools{display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:16px;align-items:end;margin:36px 0 22px}
+  .search label{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin-bottom:8px}
+  .stats{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:9px 13px;min-width:92px}
+  .stat b{display:block;font-size:20px;line-height:1.2;color:#fff}
+  .stat span{font-size:12px;color:var(--ink3)}
+  .bar{display:flex;align-items:baseline;justify-content:space-between;margin:10px 0 18px;gap:16px}
+  h2{font-size:20px}
+  .count{color:var(--ink3);font-size:14px;text-align:right}
+  .groups{display:grid;gap:16px}
+  .group{border:1px solid var(--line);border-radius:var(--r);background:rgba(24,26,34,.72);overflow:hidden}
+  .group-head{width:100%;display:flex;align-items:center;justify-content:space-between;gap:14px;
+    background:transparent;color:inherit;border:0;border-radius:0;padding:15px 18px;text-align:left;cursor:pointer}
+  .group-title{min-width:0}
+  .group-title strong{display:block;font-size:16px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .group-title span{display:block;font-size:12.5px;color:var(--ink3)}
+  .chev{font-size:18px;color:var(--acc2);line-height:1}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;padding:0 16px 16px}
+  .pcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:19px;
+    text-decoration:none;color:inherit;transition:.18s;display:block;min-width:0}
+  .pcard:hover{border-color:var(--acc);transform:translateY(-2px)}
+  .pcard .type{font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--acc2);font-weight:600}
+  .pcard h3{font-family:var(--serif);font-size:18px;margin:8px 0 10px;line-height:1.35;color:#fff;overflow-wrap:anywhere}
+  .pcard .tags{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0;min-height:24px}
+  .pcard .tags span{font-size:11.5px;color:var(--ink2);background:var(--card2);border:1px solid var(--line);
+    padding:3px 9px;border-radius:99px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pcard .foot{font-size:12.5px;color:var(--ink3);margin-top:12px;display:flex;justify-content:space-between;gap:12px}
+  .pcard .foot span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .group-more{display:flex;justify-content:center;padding:0 16px 18px}
+  .empty{color:var(--ink3);text-align:center;padding:60px 0;border:1px dashed var(--line);border-radius:var(--r);background:rgba(24,26,34,.45)}
+  footer{text-align:center;color:var(--ink3);font-size:13px;margin-top:70px}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--acc2)}
+  @media (max-width:720px){
+    .wrap{padding:0 16px}
+    header{padding-top:38px}
+    .tools{grid-template-columns:1fr}
+    .stats{justify-content:stretch}
+    .stat{flex:1}
+    .grid{grid-template-columns:1fr;padding:0 12px 12px}
+    .group-head{padding:14px}
+    select,button{width:100%}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="kicker">本地知识炼金 · 想法 → 深度页</div>
+    <h1>想法工坊 · IdeaForge</h1>
+    <p class="sub">丢进一句话、一张图、一个链接，自动炼成一张专业、可视化、并结合你处境给出启发的深度页面。所有内容存在本地，归你所有。</p>
+
+    <div class="composer">
+      <textarea id="inp" placeholder="贴一段想法、一个网页链接，或一张图片的路径…"></textarea>
+      <div class="row">
+        <span class="hint">自动识别 文字 / 网址 / 图片</span>
+        <select id="engine">
+          <option value="codex">引擎：Codex（默认 · 省额度）</option>
+          <option value="ollama">引擎：本地 Ollama（离线免费）</option>
+          <option value="claude">引擎：Claude（6/15 起独立计费）</option>
+        </select>
+        <button id="go">炼成页面</button>
+      </div>
+      <div class="note" id="status">提示：需先运行 <code>node engine/forge.mjs serve</code> 启动本地服务，此输入框才能直接生成；否则可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
+    </div>
+  </header>
+
+  <section class="tools" aria-label="页面检索">
+    <div class="search">
+      <label for="q">搜索标题、标签、分类</label>
+      <input id="q" type="search" placeholder="输入关键词实时过滤…" autocomplete="off">
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="totalPages">0</b><span>总页数</span></div>
+      <div class="stat"><b id="totalCategories">0</b><span>分类数</span></div>
+      <div class="stat"><b id="visiblePages">0</b><span>当前显示</span></div>
+    </div>
+  </section>
+
+  <div class="bar"><h2>页面库</h2><span class="count" id="count"></span></div>
+  <div class="groups" id="groups"></div>
+  <div class="empty" id="empty" style="display:none">没有匹配页面。</div>
+
+  <footer>想法工坊 v2 · 本地优先，数据自持</footer>
+</div>
+
+<script>
+const groupsEl=document.getElementById('groups'), countEl=document.getElementById('count'),
+  emptyEl=document.getElementById('empty'), statusEl=document.getElementById('status'),
+  qEl=document.getElementById('q'), totalPagesEl=document.getElementById('totalPages'),
+  totalCategoriesEl=document.getElementById('totalCategories'), visiblePagesEl=document.getElementById('visiblePages');
+
+const DEFAULT_CATEGORY='炼金成品';
+const BATCH_SIZE=60;
+const groupState=new Map();
+const groupLimit=new Map();
+let allPages=[];
+
+const SEED=[{
+  slug:'golden-reference',
+  title:'IdeaForge · 黄金范本 Golden Reference',
+  type:'demo', source:'示例 / demo',
+  tags:['IdeaForge','demo','深度分析','可视化'],
+  category:DEFAULT_CATEGORY,
+  createdAt:'2026-01-01', htmlPath:'templates/golden.html'
+}];
+
+function escapeHtml(value){
+  return String(value??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+function normalizePage(p){
+  return {...p,category:String(p.category||DEFAULT_CATEGORY).trim()||DEFAULT_CATEGORY,tags:Array.isArray(p.tags)?p.tags:[]};
+}
+function pageText(p){
+  return [p.title,p.category,(p.tags||[]).join(' ')].join(' ').toLowerCase();
+}
+function hrefFor(htmlPath){
+  const value=String(htmlPath||'#');
+  if(value.startsWith('file://')||/^[a-z]+:\/\//i.test(value))return value;
+  if(value.startsWith('/'))return 'file://'+value.split('/').map(encodeURIComponent).join('/');
+  return value;
+}
+function typeName(type){
+  return ({url:'网页',text:'想法',image:'图片',html:'HTML'})[type]||type||'页面';
+}
+function card(p){
+  const tags=(p.tags||[]).slice(0,4).map(t=>`<span>${escapeHtml(t)}</span>`).join('');
+  return `<a class="pcard" href="${escapeHtml(hrefFor(p.htmlPath))}">
+    <div class="type">${escapeHtml(typeName(p.type))}</div>
+    <h3>${escapeHtml(p.title||p.slug||'未命名页面')}</h3>
+    <div class="tags">${tags}</div>
+    <div class="foot"><span title="${escapeHtml(p.source||'本地')}">${escapeHtml(p.source||'本地')}</span><span>${escapeHtml(p.createdAt||'')}</span></div>
+  </a>`;
+}
+function groupPages(list){
+  const map=new Map();
+  for(const p of list){
+    const category=p.category||DEFAULT_CATEGORY;
+    if(!map.has(category))map.set(category,[]);
+    map.get(category).push(p);
+  }
+  return [...map.entries()].sort((a,b)=>a[0].localeCompare(b[0],'zh-Hans'));
+}
+function defaultOpen(category,total,renderedSoFar){
+  if(groupState.has(category))return groupState.get(category);
+  if(total>50)return false;
+  return renderedSoFar+BATCH_SIZE<=BATCH_SIZE;
+}
+function render(){
+  const query=qEl.value.trim().toLowerCase();
+  const filtered=allPages
+    .filter(p=>!query||pageText(p).includes(query))
+    .sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')||(b.title||'').localeCompare(a.title||'','zh-Hans'));
+  const groups=groupPages(filtered);
+  const totalCategories=new Set(allPages.map(p=>p.category||DEFAULT_CATEGORY)).size;
+  totalPagesEl.textContent=allPages.length;
+  totalCategoriesEl.textContent=totalCategories;
+  visiblePagesEl.textContent=filtered.length;
+  countEl.textContent=query?`匹配 ${filtered.length} / ${allPages.length} 篇`:`${filtered.length} 篇`;
+  emptyEl.style.display=filtered.length?'none':'block';
+  groupsEl.innerHTML='';
+  let renderedSoFar=0;
+  for(const [category,items] of groups){
+    const open=defaultOpen(category,items.length,renderedSoFar);
+    if(open)renderedSoFar+=Math.min(groupLimit.get(category)||BATCH_SIZE,items.length);
+    const limit=groupLimit.get(category)||BATCH_SIZE;
+    const visible=open?items.slice(0,limit):[];
+    const group=document.createElement('section');
+    group.className='group';
+    group.innerHTML=`<button class="group-head" type="button" data-category="${escapeHtml(category)}" aria-expanded="${open?'true':'false'}">
+      <span class="group-title"><strong>${escapeHtml(category)}</strong><span>${items.length} 篇${items.length>50?' · 大分类默认折叠':''}</span></span>
+      <span class="chev">${open?'−':'+'}</span>
+    </button>
+    ${open?`<div class="grid">${visible.map(card).join('')}</div>
+    ${items.length>visible.length?`<div class="group-more"><button class="secondary small" type="button" data-more="${escapeHtml(category)}">再加载 ${Math.min(BATCH_SIZE,items.length-visible.length)} 篇</button></div>`:''}`:''}`;
+    groupsEl.appendChild(group);
+  }
+}
+groupsEl.addEventListener('click',event=>{
+  const head=event.target.closest('[data-category]');
+  const more=event.target.closest('[data-more]');
+  if(head){
+    const category=head.getAttribute('data-category');
+    groupState.set(category,head.getAttribute('aria-expanded')!=='true');
+    if(!groupLimit.has(category))groupLimit.set(category,BATCH_SIZE);
+    render();
+  }else if(more){
+    const category=more.getAttribute('data-more');
+    groupLimit.set(category,(groupLimit.get(category)||BATCH_SIZE)+BATCH_SIZE);
+    groupState.set(category,true);
+    render();
+  }
+});
+qEl.addEventListener('input',()=>{
+  groupLimit.clear();
+  render();
+});
+function load(list){
+  allPages=(Array.isArray(list)?list:[]).map(normalizePage);
+  render();
+}
+fetch('pages.json',{cache:'no-store'}).then(r=>{
+  if(!r.ok)throw new Error('pages.json unavailable');
+  return r.json();
+}).then(load).catch(()=>load(SEED));
+
+document.getElementById('go').onclick=async()=>{
+  const v=document.getElementById('inp').value.trim();
+  const engine=document.getElementById('engine').value;
+  if(!v){statusEl.textContent='先输入点东西。';return;}
+  statusEl.textContent='炼制中…（需 forge serve 在运行）';
+  try{
+    const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({input:v,engine})});
+    if(!res.ok)throw new Error('generate failed');
+    const data=await res.json();
+    statusEl.innerHTML='已生成：<a href="'+escapeHtml(hrefFor(data.htmlPath))+'" style="color:var(--acc)">'+escapeHtml(data.title)+'</a>';
+    const fresh=await fetch('pages.json',{cache:'no-store'}).then(r=>r.json());
+    load(fresh);
+  }catch(e){
+    statusEl.innerHTML='本地服务未启动或生成失败。请在终端运行：<code>node engine/forge.mjs serve</code>，或直接 <code>node engine/forge.mjs "'+escapeHtml(v.slice(0,20))+'…"</code>';
+  }
+};
+</script>
+</body>
+</html>
