@@ -4,19 +4,19 @@ Turn any idea, link, or image into a self-contained, visual knowledge page — l
 
 ## Business Context
 
-- **Category:** security and governance tool
-- **Audience:** builders and operators who need safer repositories, cleaner handoffs, and repeatable security checks.
+- **Category:** AI workflow infrastructure
+- **Audience:** AI builders, creators, independent developers, and small teams that want repeatable local AI workflows.
 - **Repository status:** Public repository. Keep examples, docs, and issues free of credentials, private data, and machine-specific paths.
 
 ## What This Project Is For
 
 - Turn any idea, link, or image into a self-contained, visual knowledge page — locally, with the AI engine of your choice (codex/claude/ollama). 把想法/链接/图片一键炼成自包含可视化 HTML 深度页,全本地、可检索、个性化.
-- Find repository risks early without exposing secrets in reports.
-- Make security review repeatable across public and private codebases.
+- Package repeatable AI workflows into reusable local assets.
+- Reduce one-off prompt work with versioned skills, guardrails, and handoff files.
 
 ## Where It Fits
 
-This repository belongs in the trust-and-safety layer of the workbench: it helps make code, configuration, and public handoffs safer before they are reused or shown to clients.
+This repository is part of a broader AI local-workbench operating model: reusable skills, local automation, auditable configuration, and repeatable delivery workflows.
 
 ## Technical Overview
 
