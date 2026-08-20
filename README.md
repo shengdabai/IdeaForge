@@ -65,7 +65,7 @@ node engine/forge.mjs https://example.com/some-article
 node engine/forge.mjs ./inputs/some-screenshot.png
 
 # 4. Browse everything in the dashboard
-node engine/forge.mjs serve         # then open http://127.0.0.1:8765
+node engine/forge.mjs serve         # open the complete local URL printed by the command
 ```
 
 **Install the global `forge` command (optional):**
@@ -76,6 +76,12 @@ forge "any idea, from any directory"
 forge serve
 forge import ./my-old-html-folder --category=archive
 ```
+
+### Dashboard access token
+
+`forge serve` binds only to `127.0.0.1` and prints a complete Dashboard URL for that server session. Open that exact URL: its `#forge-token=...` fragment is never sent as an HTTP request, is removed from the address bar immediately, and is used only as the `X-Forge-Token` header for `POST /generate`.
+
+The token is generated afresh on every `serve` invocation unless you set `IDEAFORGE_DASHBOARD_TOKEN` in your shell. It is never written beneath the project or served as a static file. Requests for dotfiles and reserved token filenames are refused by the static server.
 
 On macOS you can also **double-click `start-dashboard.command`** to launch the server and open the dashboard in one step.
 
@@ -108,7 +114,7 @@ forge https://...                        # url  → page
 forge ./image.png                        # image → page
 forge --engine=ollama "an idea"          # pick the engine
 forge --ingest-only https://...          # debug: just show what was fetched
-forge serve [--port=8765]                # start the dashboard server
+forge serve [--port=8765]                # start the dashboard server; open its printed URL
 forge import <dir> [--category=name] [--copy] [--exclude=glob,glob]
 ```
 

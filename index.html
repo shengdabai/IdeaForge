@@ -93,7 +93,7 @@
         </select>
         <button id="go">炼成页面</button>
       </div>
-      <div class="note" id="status">提示：需先运行 <code>node engine/forge.mjs serve</code> 启动本地服务，此输入框才能直接生成；否则可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
+      <div class="note" id="status">提示：请从 <code>forge serve</code> 输出的本地链接打开此页，输入框才可安全生成；也可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
     </div>
   </header>
 
@@ -127,6 +127,8 @@ const BATCH_SIZE=60;
 const groupState=new Map();
 const groupLimit=new Map();
 let allPages=[];
+const dashboardToken=new URLSearchParams(location.hash.slice(1)).get('forge-token')||'';
+if(dashboardToken){history.replaceState(null,'',location.pathname+location.search);}
 
 const SEED=[{
   slug:'golden-reference',
@@ -240,16 +242,18 @@ document.getElementById('go').onclick=async()=>{
   const v=document.getElementById('inp').value.trim();
   const engine=document.getElementById('engine').value;
   if(!v){statusEl.textContent='先输入点东西。';return;}
+  if(!dashboardToken){statusEl.innerHTML='缺少本次服务的访问令牌。请从 <code>forge serve</code> 输出的本地链接重新打开 Dashboard。';return;}
   statusEl.textContent='炼制中…（需 forge serve 在运行）';
   try{
-    const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+    const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json','X-Forge-Token':dashboardToken},
       body:JSON.stringify({input:v,engine})});
-    if(!res.ok)throw new Error('generate failed');
+    if(!res.ok)throw new Error(res.status===401?'令牌已失效，请从当前 forge serve 输出的链接重新打开。':'generate failed');
     const data=await res.json();
     statusEl.innerHTML='已生成：<a href="'+escapeHtml(hrefFor(data.htmlPath))+'" style="color:var(--acc)">'+escapeHtml(data.title)+'</a>';
     const fresh=await fetch('pages.json',{cache:'no-store'}).then(r=>r.json());
     load(fresh);
   }catch(e){
+    if(e.message.includes('令牌已失效')){statusEl.textContent=e.message;return;}
     statusEl.innerHTML='本地服务未启动或生成失败。请在终端运行：<code>node engine/forge.mjs serve</code>，或直接 <code>node engine/forge.mjs "'+escapeHtml(v.slice(0,20))+'…"</code>';
   }
 };
