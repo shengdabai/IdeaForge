@@ -52,7 +52,7 @@ The killer feature is **`profile.md`** — a short description of who you are an
 
 ```bash
 # 1. Clone
-git clone https://github.com/<your-name>/IdeaForge.git
+git clone https://github.com/shengdabai/IdeaForge.git
 cd IdeaForge
 
 # 2. Make it yours — edit profile.md with your real situation (this is the magic)
@@ -115,13 +115,14 @@ forge ./image.png                        # image → page
 forge --engine=ollama "an idea"          # pick the engine
 forge --ingest-only https://...          # debug: just show what was fetched
 forge serve [--port=8765]                # start the dashboard server; open its printed URL
-forge import <dir> [--category=name] [--copy] [--exclude=glob,glob]
+forge import <dir> [--category=name] [--copy|--link] [--exclude=glob,glob]
 ```
 
 **Bulk import existing HTML** into the searchable index:
 
-- without `--copy`: registers the original file path (nothing is moved or deleted)
-- with `--copy`: copies into `pages/<category>/` and indexes the copy
+- default (or `--copy`): copies HTML into `pages/<category>/` so the HTTP dashboard can open it; original files remain untouched
+- explicit `--link`: only registers the original file path for local-file workflows; browsers cannot open these `file://` links from the HTTP dashboard
+- HTML copies are self-contained-file imports; external relative images/styles are not copied automatically
 - auto-skips browser-extension fragments and shells smaller than 300 bytes
 
 ---

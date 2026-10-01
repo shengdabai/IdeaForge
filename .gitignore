@@ -26,3 +26,6 @@ node_modules/
 .idea/
 
 # Keep an empty pages.json placeholder tracked? No — dashboard creates it on first run.
+
+# Local project index notes (personal, not for public repo)
+索引.md

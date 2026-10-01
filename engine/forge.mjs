@@ -32,7 +32,7 @@ function usage() {
   return [
     "Usage:",
     '  node engine/forge.mjs [--engine=codex|claude|ollama] [--ingest-only] "想法/URL/图片路径"',
-    "  node engine/forge.mjs import <dir> [--category=名] [--copy] [--exclude=glob,glob]",
+    "  node engine/forge.mjs import <dir> [--category=名] [--copy|--link] [--exclude=glob,glob]",
     "  node engine/forge.mjs serve [--port=8765]",
     "  node engine/forge.mjs --self-test",
   ].join("\n");
@@ -50,9 +50,10 @@ async function fileExists(filePath) {
 export async function classifyInput(input) {
   const value = String(input || "").trim();
   if (/^https?:\/\//i.test(value)) return "url";
-  const resolved = path.resolve(ROOT, value);
-  if ((await fileExists(resolved)) && IMAGE_EXTENSIONS.has(path.extname(resolved).toLowerCase())) return "image";
-  if ((await fileExists(path.resolve(value))) && IMAGE_EXTENSIONS.has(path.extname(value).toLowerCase())) return "image";
+  // Check relative-to-ROOT first, then absolute/cwd-relative path.
+  for (const candidate of [path.resolve(ROOT, value), path.resolve(value)]) {
+    if (IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase()) && (await fileExists(candidate))) return "image";
+  }
   return "text";
 }
 
@@ -64,7 +65,7 @@ export function parseArgs(argv) {
     input: "",
     importDir: "",
     importCategory: "",
-    importCopy: false,
+    importCopy: true,
     importExclude: "",
     port: DEFAULT_PORT,
     selfTest: false,
@@ -76,6 +77,7 @@ export function parseArgs(argv) {
     else if (arg === "--ingest-only") parsed.ingestOnly = true;
     else if (arg === "--self-test") parsed.selfTest = true;
     else if (arg === "--copy") parsed.importCopy = true;
+    else if (arg === "--link") parsed.importCopy = false;
     else if (arg.startsWith("--engine=")) parsed.engine = arg.slice("--engine=".length);
     else if (arg.startsWith("--port=")) parsed.port = Number(arg.slice("--port=".length));
     else if (arg.startsWith("--category=")) parsed.importCategory = arg.slice("--category=".length).trim();
@@ -294,8 +296,13 @@ function sourceFromRecord(record) {
   return "本地文本";
 }
 
+// IdeaForge is macOS-only for the auto-open feature (uses `open`).
+// On other platforms the file is still generated; open it manually.
 async function openFile(filePath) {
-  if (process.platform !== "darwin") return;
+  if (process.platform !== "darwin") {
+    console.warn(`[IdeaForge] auto-open not supported on ${process.platform}. File saved to: ${filePath}`);
+    return;
+  }
   const child = spawn("open", [filePath], { stdio: "ignore" });
   child.unref();
 }
@@ -398,7 +405,7 @@ function primaryCopyTarget(category, baseName) {
 async function availableCopyTarget(primary, usedPaths) {
   if (!usedPaths.has(primary.relative) && !(await fileExists(primary.absolute))) return primary;
   let i = 2;
-  while (true) {
+  while (i <= 9999) {
     const fileName = `${primary.safeBase}-${i}.html`;
     const relative = path.posix.join(path.posix.dirname(primary.relative), fileName);
     const absolute = path.join(primary.targetDir, fileName);
@@ -407,6 +414,7 @@ async function availableCopyTarget(primary, usedPaths) {
     }
     i += 1;
   }
+  throw new Error(`availableCopyTarget: could not find a free filename for "${primary.safeBase}" after 9999 attempts`);
 }
 
 // 外来 html 的 .tag 类语义不可控（常被用作状态徽章），严格清洗：
@@ -423,7 +431,8 @@ function sanitizeImportTags(html, category) {
   return [...new Set([category, ...cleaned])].filter(Boolean).slice(0, 5);
 }
 
-export async function importPages(dir, { category = "", copy = false, exclude = "" } = {}) {
+export async function importPages(dir, { category = "", copy = true, exclude = "" } = {}) {
+  if (!copy) console.warn("[import] --link indexes local paths only; HTTP dashboard browsers cannot open file:// links. Omit --link to copy portable HTML.");
   const importRoot = path.resolve(dir || "");
   const info = await stat(importRoot);
   const isSingleFile = info.isFile() && path.extname(importRoot).toLowerCase() === ".html";

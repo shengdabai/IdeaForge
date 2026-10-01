@@ -9,7 +9,7 @@
   "scripts": {
     "forge": "node engine/forge.mjs",
     "serve": "node engine/forge.mjs serve",
-    "test": "node engine/forge.mjs --self-test"
+    "test": "node engine/forge.mjs --self-test && node --test engine/forge.test.mjs"
   },
   "keywords": [
     "knowledge-management",
