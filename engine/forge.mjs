@@ -6,12 +6,13 @@ import { access, copyFile, lstat, mkdir, open, opendir, readFile, realpath, rena
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ingest } from "./ingest.mjs";
-import { generateHtml } from "./generate.mjs";
+import { assertLocalProfileReady, generateHtml } from "./generate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const PAGES_DIR = path.join(ROOT, "pages");
 const PAGES_JSON = path.join(ROOT, "pages.json");
+const INPUTS_DIR = path.join(ROOT, "inputs");
 const DEFAULT_PORT = 8765;
 const DEFAULT_CATEGORY = "炼金成品";
 const INDEX_LOCK_TIMEOUT_MS = 5_000;
@@ -296,6 +297,45 @@ function sourceFromRecord(record) {
   return "本地文本";
 }
 
+function archiveReference(record) {
+  if (!record?.archivePath) return "";
+  const absolute = path.resolve(record.archivePath);
+  const relative = path.relative(INPUTS_DIR, absolute);
+  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || relative.includes(path.sep)) {
+    return "";
+  }
+  return `inputs/${relative}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
+
+export function injectProvenance(html, record) {
+  const sourceHtml = String(html);
+  if (!/<\/body>/iu.test(sourceHtml)) {
+    throw new Error("Generated HTML has no closing </body>; provenance could not be attached.");
+  }
+  if (/data-ideaforge-provenance/iu.test(sourceHtml)) {
+    throw new Error("Generated HTML already contains a reserved provenance marker.");
+  }
+  const archivePath = archiveReference(record);
+  const sourceUrl = /^https?:\/\//iu.test(String(record?.sourceUrl || "")) ? record.sourceUrl : "";
+  const source = sourceUrl || (record?.type === "image" ? "本地图片" : "本地文本");
+  const sourceMarkup = sourceUrl
+    ? `<a href="${escapeHtml(sourceUrl)}" rel="noopener noreferrer">原始网址</a>`
+    : `<span>${escapeHtml(source)}</span>`;
+  const archiveMarkup = archivePath
+    ? `<a href="../${escapeHtml(archivePath)}">本机采集记录</a>`
+    : "<span>本机采集记录不可用</span>";
+  const block = `<footer data-ideaforge-provenance style="margin:3rem auto 1rem;max-width:72rem;padding:1rem;border-top:1px solid currentColor;font:14px/1.6 system-ui,sans-serif;opacity:.78"><strong>来源记录</strong> · ${sourceMarkup} · ${archiveMarkup} · <time datetime="${escapeHtml(record?.fetchedAt || "")}">${escapeHtml(record?.fetchedAt || "采集时间未知")}</time></footer>`;
+  const bodyMatches = [...sourceHtml.matchAll(/<\/body>/giu)];
+  const insertionPoint = bodyMatches.at(-1).index;
+  return `${sourceHtml.slice(0, insertionPoint)}${block}${sourceHtml.slice(insertionPoint)}`;
+}
+
 // IdeaForge is macOS-only for the auto-open feature (uses `open`).
 // On other platforms the file is still generated; open it manually.
 async function openFile(filePath) {
@@ -309,10 +349,11 @@ async function openFile(filePath) {
 
 export async function forge(input, { engine = "codex", ingestOnly = false, shouldOpen = true } = {}) {
   const type = await classifyInput(input);
+  if (!ingestOnly) await assertLocalProfileReady();
   const record = await ingest(input, type);
   if (ingestOnly) return { mode: "ingest-only", record };
 
-  const html = await generateHtml(record, engine);
+  const html = injectProvenance(await generateHtml(record, engine), record);
   const title = extractTitle(html, record.title);
   const { slug, filePath } = await writeNewPage(slugify(title, slugify(record.title, "page")), html);
 
@@ -321,6 +362,8 @@ export async function forge(input, { engine = "codex", ingestOnly = false, shoul
     title,
     type: record.type,
     source: sourceFromRecord(record),
+    archivePath: archiveReference(record) || undefined,
+    fetchedAt: record.fetchedAt || undefined,
     tags: extractTags(html),
     category: DEFAULT_CATEGORY,
     createdAt: new Date().toISOString().slice(0, 10),
@@ -559,12 +602,18 @@ function isSensitiveStaticPath(relativePath) {
   return relativePath.split(/[\\/]+/).some((part) => part.startsWith(".") || SENSITIVE_STATIC_NAMES.has(part.toLowerCase()));
 }
 
+function isInputArchivePath(relativePath) {
+  const normalized = relativePath.split(path.sep).join("/");
+  return /^inputs\/[^/]+\.json$/iu.test(normalized);
+}
+
 function isAllowedStaticPath(relativePath) {
   const normalized = relativePath.split(path.sep).join("/");
   return normalized === "index.html"
     || normalized === "pages.json"
     || normalized.startsWith("pages/")
-    || normalized.startsWith("templates/");
+    || normalized.startsWith("templates/")
+    || isInputArchivePath(normalized);
 }
 
 function isAuthorized(req, token) {
@@ -593,7 +642,8 @@ async function serveStatic(req, res) {
   try {
     const [rootPath, resolvedFilePath] = await Promise.all([realpath(ROOT), realpath(filePath)]);
     const resolvedRelative = path.relative(rootPath, resolvedFilePath);
-    if (!resolvedRelative || resolvedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(resolvedRelative) || !isAllowedStaticPath(resolvedRelative)) {
+    const inputRouteChangedClass = isInputArchivePath(relative) && !isInputArchivePath(resolvedRelative);
+    if (!resolvedRelative || resolvedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(resolvedRelative) || !isAllowedStaticPath(resolvedRelative) || inputRouteChangedClass) {
       res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
       res.end("Forbidden");
       return;
@@ -617,6 +667,14 @@ export async function serve({
   if (typeof token !== "string" || !token) throw new Error("Dashboard token must be a non-empty string.");
   const server = http.createServer(async (req, res) => {
     try {
+      const address = server.address();
+      const actualPort = typeof address === "object" && address ? address.port : port;
+      const host = String(req.headers.host || "").toLowerCase();
+      if (!new Set([`127.0.0.1:${actualPort}`, `localhost:${actualPort}`]).has(host)) {
+        res.writeHead(421, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+        res.end("Misdirected request");
+        return;
+      }
       if (req.method === "POST" && req.url === "/generate") {
         if (!isAuthorized(req, token)) {
           sendJson(res, 401, { error: "Missing or invalid X-Forge-Token." });
@@ -720,4 +778,5 @@ export const __test__ = {
   extractTitle,
   extractTags,
   writeNewPage,
+  archiveReference,
 };

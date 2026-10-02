@@ -10,16 +10,32 @@ async function readProjectFile(relativePath) {
   return readFile(path.join(ROOT, relativePath), "utf8");
 }
 
-// Prefer a private, git-ignored profile.local.md if present; fall back to the
-// tracked profile.md template. Lets users keep real personal details out of git.
-// 优先读取被 git 忽略的 profile.local.md;不存在则回退到模板 profile.md。
 async function readProfile() {
   try {
-    return await readFile(path.join(ROOT, "profile.local.md"), "utf8");
+    return validateLocalProfile(await readFile(path.join(ROOT, "profile.local.md"), "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    return readFile(path.join(ROOT, "profile.md"), "utf8");
+    throw new Error(
+      "首次生成前请先创建私有画像：cp profile.md profile.local.md，然后把占位说明替换为你的真实情况。",
+    );
   }
+}
+
+export async function assertLocalProfileReady() {
+  await readProfile();
+}
+
+export function validateLocalProfile(profile) {
+  const text = String(profile || "").trim();
+  const placeholderSignals = [
+    "What you do (role, industry, audience)",
+    "Your main projects / products / income streams",
+    "首次使用前,请把下面的内容全部替换",
+  ];
+  if (text.length < 40 || placeholderSignals.some((signal) => text.includes(signal))) {
+    throw new Error("profile.local.md 仍是模板或内容过短，请完成画像后再生成。");
+  }
+  return text;
 }
 
 export function stripHtmlFence(output) {

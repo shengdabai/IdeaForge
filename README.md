@@ -55,9 +55,10 @@ The killer feature is **`profile.md`** — a short description of who you are an
 git clone https://github.com/shengdabai/IdeaForge.git
 cd IdeaForge
 
-# 2. Make it yours — edit profile.md with your real situation (this is the magic)
-#    编辑 profile.md,填上你自己的真实画像(这是个性化的来源)
-$EDITOR profile.md
+# 2. Create a private, git-ignored profile and edit it
+#    创建被 git 忽略的私有画像，再填写真实情况
+cp profile.md profile.local.md
+$EDITOR profile.local.md
 
 # 3. Forge a page from a thought / URL / image
 node engine/forge.mjs "Why is platform economics the ultimate predator?"
@@ -104,6 +105,12 @@ Three clean layers, each swappable:
 - **`generate.mjs` + `prompt.md`** — assembles the three-part prompt (style contract + deep-analysis task + your profile) and validates the model returns a full HTML document.
 - **`engines.mjs`** — the adapter that talks to `codex`, `claude`, or `ollama`, with retry/backoff.
 
+Every generated page receives a programmatic source footer after model output validation. It links to the
+local archived ingest record and records the fetch time; these fields are also retained in `pages.json`.
+The local server exposes only flat, allow-listed archive filenames beneath `inputs/`, and rejects traversal
+and symlinks that resolve into another area of the project. It also rejects requests whose Host is not the
+active `127.0.0.1:<port>` or `localhost:<port>` endpoint.
+
 ---
 
 ## Commands · 命令
@@ -145,16 +152,17 @@ forge import <dir> [--category=name] [--copy|--link] [--exclude=glob,glob]
 
 ## Personalization · 个性化
 
-Open [`profile.md`](profile.md) and describe:
+Copy [`profile.md`](profile.md) to the git-ignored `profile.local.md`, then describe:
 
 - **Identity** — what you do, your audience, your stage
 - **What you're building** — projects, products, channels
 - **Stack & habits** — languages, deploy targets, constraints
 - **Thinking preferences** — how you like insight framed
 
-The sharper the profile, the more valuable the closing takeaways. Keep a private copy as `profile.local.md` (git-ignored) if you don't want your real details in your fork's history.
+The sharper the profile, the more valuable the closing takeaways. Generation stops before ingest or any
+model call when `profile.local.md` is missing, still contains template prompts, or is too short.
 
-> 画像越准,启发越值钱。若不想真实细节进 fork 的 git 历史,把私有版本存为 `profile.local.md`(已被 .gitignore 排除)。
+> 画像越准,启发越值钱。真实信息只写入 `profile.local.md`（已被 `.gitignore` 排除）；缺少或未完成时，系统会在采集和模型调用前停止。
 
 ---
 
@@ -179,7 +187,7 @@ IdeaForge/
 ├── templates/
 │   └── golden.html    # visual & structural reference for every generated page
 ├── index.html         # the dashboard (reads pages.json)
-├── profile.md         # YOUR profile — edit this first
+├── profile.md         # public template; copy to profile.local.md first
 ├── install.sh         # installs the global `forge` command
 ├── start-dashboard.command   # macOS double-click launcher
 └── SPEC.md            # full system design spec
