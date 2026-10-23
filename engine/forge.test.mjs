@@ -4,6 +4,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { __test__, serve, updatePagesIndex } from "./forge.mjs";
 import { injectProvenance } from "./forge.mjs";
 import { validateLocalProfile } from "./generate.mjs";
@@ -95,7 +96,7 @@ test("first-run profile validation fails before a template can be sent to an eng
 });
 
 test("programmatic provenance links only a direct archive beneath inputs", () => {
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const record = {
     type: "url",
     sourceUrl: "https://example.com/$&$`$'?a=1&b=2",
