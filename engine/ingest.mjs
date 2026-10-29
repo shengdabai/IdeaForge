@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -7,6 +9,21 @@ import { homedir } from "node:os";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const INPUTS_DIR = path.join(ROOT, "inputs");
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"]);
+
+export async function resolveImagePath(input) {
+  const value = String(input || "").trim();
+  // Preserve project-relative lookup before caller-relative lookup in both stages.
+  for (const candidate of new Set([path.resolve(ROOT, value), path.resolve(value)])) {
+    if (!IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase())) continue;
+    try {
+      if ((await stat(candidate)).isFile()) return candidate;
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR", "ENAMETOOLONG"].includes(error.code)) throw error;
+    }
+  }
+  return "";
+}
 
 function runProcess(command, args, { input, timeoutMs = 45_000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -64,8 +81,8 @@ async function ensureInputsDir() {
 
 async function archiveRecord(record, label) {
   await ensureInputsDir();
-  const file = path.join(INPUTS_DIR, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}.json`);
-  await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  const file = path.join(INPUTS_DIR, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}-${randomUUID()}.json`);
+  await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
   return file;
 }
 
@@ -232,10 +249,11 @@ async function describeImageWithOllama(imagePath) {
 }
 
 async function ingestImage(input) {
-  const imagePath = path.resolve(input);
+  const imagePath = await resolveImagePath(input);
+  if (!imagePath) throw new Error(`Image input is not an existing image file: ${input}`);
   await ensureInputsDir();
-  const archivedImage = path.join(INPUTS_DIR, `${timestampSlug()}-${safePart(path.basename(imagePath), "image")}${path.extname(imagePath)}`);
-  await copyFile(imagePath, archivedImage);
+  const archivedImage = path.join(INPUTS_DIR, `${timestampSlug()}-${safePart(path.basename(imagePath), "image")}-${randomUUID()}${path.extname(imagePath)}`);
+  await copyFile(imagePath, archivedImage, constants.COPYFILE_EXCL);
 
   let rawContent = "";
   try {

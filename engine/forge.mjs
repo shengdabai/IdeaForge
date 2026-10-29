@@ -5,7 +5,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { access, copyFile, lstat, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ingest } from "./ingest.mjs";
+import { ingest, resolveImagePath } from "./ingest.mjs";
 import { assertLocalProfileReady, generateHtml } from "./generate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,7 +17,6 @@ const DEFAULT_PORT = 8765;
 const DEFAULT_CATEGORY = "炼金成品";
 const INDEX_LOCK_TIMEOUT_MS = 5_000;
 const SENSITIVE_STATIC_NAMES = new Set(["token", "forge-token", "forge.token", "dashboard-token", "dashboard.token"]);
-const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"]);
 const EXTENSION_FRAGMENT_NAMES = new Set([
   "popup.html",
   "background.html",
@@ -51,10 +50,7 @@ async function fileExists(filePath) {
 export async function classifyInput(input) {
   const value = String(input || "").trim();
   if (/^https?:\/\//i.test(value)) return "url";
-  // Check relative-to-ROOT first, then absolute/cwd-relative path.
-  for (const candidate of [path.resolve(ROOT, value), path.resolve(value)]) {
-    if (IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase()) && (await fileExists(candidate))) return "image";
-  }
+  if (await resolveImagePath(value)) return "image";
   return "text";
 }
 

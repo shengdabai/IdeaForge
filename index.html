@@ -150,9 +150,10 @@ function pageText(p){
 }
 function hrefFor(htmlPath){
   const value=String(htmlPath||'#');
+  if(value==='#')return value;
   if(value.startsWith('file://')||/^[a-z]+:\/\//i.test(value))return value;
   if(value.startsWith('/'))return 'file://'+value.split('/').map(encodeURIComponent).join('/');
-  return value;
+  return value.split('/').map(encodeURIComponent).join('/');
 }
 function typeName(type){
   return ({url:'网页',text:'想法',image:'图片',html:'HTML'})[type]||type||'页面';
