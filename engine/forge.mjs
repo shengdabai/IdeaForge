@@ -516,7 +516,11 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
 
     const basename = path.basename(filePath);
     const relativeToImportRoot = path.relative(importRoot, filePath);
-    if (isExcluded(relativeToImportRoot, basename, matchers)) {
+    const pageCategory = inferCategory(filePath, importRoot, rootName, category);
+    const primary = copy ? primaryCopyTarget(pageCategory, path.basename(filePath, path.extname(filePath))) : null;
+    if (isSensitiveStaticPath(relativeToImportRoot || basename)
+      || (primary && isSensitiveStaticPath(primary.relative))
+      || isExcluded(relativeToImportRoot, basename, matchers)) {
       skipped.excluded += 1;
       continue;
     }
@@ -533,12 +537,10 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
       }
 
       const html = await readFile(filePath, "utf8");
-      const pageCategory = inferCategory(filePath, importRoot, rootName, category);
       const title = extractTitle(html, path.basename(filePath, path.extname(filePath)));
       const tags = sanitizeImportTags(html, pageCategory);
       let htmlPath;
       if (copy) {
-        const primary = primaryCopyTarget(pageCategory, path.basename(filePath, path.extname(filePath)));
         const identity = sourceIdentity(path.resolve(filePath), pageCategory);
         if (copiedSources.has(identity)) {
           skipped.duplicate += 1;
@@ -658,7 +660,7 @@ function sendJson(res, statusCode, data) {
 function isSensitiveStaticPath(relativePath) {
   return relativePath.split(/[\\/]+/).some((part) => part.startsWith(".")
     || SENSITIVE_STATIC_NAMES.has(part.toLowerCase())
-    || /^(?:auth\.json|credentials.*|secrets.*|id_rsa.*)$/i.test(part)
+    || /^(?:auth\.json|(?:credentials|secrets)(?:\..*)?|id_rsa.*)$/i.test(part)
     || /\.(?:key|pem)$/i.test(part));
 }
 
@@ -746,8 +748,11 @@ export async function serve({
       }
       const origin = req.headers.origin;
       const site = req.headers["sec-fetch-site"];
-      if ((origin !== undefined && origin !== `http://${host}`)
-        || (site !== undefined && site !== "same-origin" && site !== "none")) {
+      const isDocumentNavigation = req.method === "GET"
+        && req.headers["sec-fetch-mode"] === "navigate"
+        && req.headers["sec-fetch-dest"] === "document";
+      if (!isDocumentNavigation && ((origin !== undefined && origin !== `http://${host}`)
+        || (site !== undefined && site !== "same-origin" && site !== "none"))) {
         throw requestError(403, "Only same-origin local requests are allowed.");
       }
       if (req.method === "POST" && req.url === "/generate") {

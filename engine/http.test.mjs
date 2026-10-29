@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -19,6 +20,17 @@ async function withServer(run) {
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+function requestStatus(base, pathname, { method = "GET", headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL(pathname, base), { method, headers }, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response.statusCode));
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 test("request body keeps UTF-8 characters split across network chunks", async () => {
@@ -98,6 +110,51 @@ test("cross-site requests cannot read archives or trigger generation", async () 
     }
     assert.equal(received.length, 0);
     assert.equal((await fetch(`${base}/index.html`, { headers: { Origin: base, "Sec-Fetch-Site": "same-origin" } })).status, 200);
+  });
+});
+
+test("top-level document GET navigations can open read-only pages from another site", async () => {
+  await withServer(async ({ base, received }) => {
+    for (const site of ["same-site", "cross-site"]) {
+      const headers = {
+        "Sec-Fetch-Site": site, "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document",
+      };
+      for (const pathname of ["/", "/index.html", "/templates/golden.html"]) {
+        assert.equal(await requestStatus(base, pathname, { headers }), 200, `${site}: ${pathname}`);
+      }
+      assert.equal(await requestStatus(base, "/generate", { headers }), 403);
+      assert.equal(await requestStatus(base, "/engine/forge.mjs", { headers }), 403);
+    }
+    assert.equal(received.length, 0);
+  });
+});
+
+test("navigation headers do not allow embedded, non-GET, or cross-site generation requests", async () => {
+  await withServer(async ({ base, token, received }) => {
+    for (const site of ["same-site", "cross-site"]) {
+      const navigation = {
+        "Sec-Fetch-Site": site, "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document",
+      };
+      for (const headers of [
+        { ...navigation, "Sec-Fetch-Mode": "cors" },
+        { ...navigation, "Sec-Fetch-Mode": "no-cors" },
+        { ...navigation, "Sec-Fetch-Dest": "iframe" },
+        { ...navigation, "Sec-Fetch-Dest": "empty" },
+        { "Sec-Fetch-Site": site },
+      ]) {
+        assert.equal(await requestStatus(base, "/index.html", { headers }), 403);
+      }
+      assert.equal(await requestStatus(base, "/index.html", { method: "HEAD", headers: navigation }), 403);
+      assert.equal(await requestStatus(base, "/generate", {
+        method: "POST", headers: { ...navigation, "X-Forge-Token": token },
+      }), 403);
+    }
+    for (const supplied of [undefined, "synthetic-invalid-token"]) {
+      const headers = { "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" };
+      if (supplied) headers["X-Forge-Token"] = supplied;
+      assert.equal(await requestStatus(base, "/generate", { method: "POST", headers }), 401);
+    }
+    assert.equal(received.length, 0);
   });
 });
 
