@@ -111,6 +111,12 @@ The local server exposes only flat, allow-listed archive filenames beneath `inpu
 and symlinks that resolve into another area of the project. It also rejects requests whose Host is not the
 active `127.0.0.1:<port>` or `localhost:<port>` endpoint.
 
+The server also refuses cross-site `Origin` / `Sec-Fetch-Site` headers and checks sensitive
+filenames again after resolving symlinks. `POST /generate` requires a non-empty string `input`
+and an optional `engine` of `codex`, `claude`, or `ollama`; malformed requests return 400,
+and bodies over 2 MiB return 413 before generation starts.
+Firecrawl receives its authorization header through stdin rather than exposing the key in process arguments.
+
 ---
 
 ## Commands · 命令
@@ -130,6 +136,11 @@ forge import <dir> [--category=name] [--copy|--link] [--exclude=glob,glob]
 - default (or `--copy`): copies HTML into `pages/<category>/` so the HTTP dashboard can open it; original files remain untouched
 - explicit `--link`: only registers the original file path for local-file workflows; browsers cannot open these `file://` links from the HTTP dashboard
 - HTML copies are self-contained-file imports; external relative images/styles are not copied automatically
+- different sources with the same filename receive distinct copies, including concurrent imports
+- repeating a completed copy import of the same source path and category skips that source;
+  imports are snapshots and do not overwrite an earlier copy when the original changes
+- category and filename prefixes consisting of dots are removed so copies remain beneath `pages/`
+- stored filename parts are limited by UTF-8 bytes, leaving room for timestamps and collision suffixes
 - auto-skips browser-extension fragments and shells smaller than 300 bytes
 
 ---

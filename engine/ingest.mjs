@@ -66,9 +66,14 @@ function safePart(input, fallback = "input") {
   const cleaned = String(input || "")
     .normalize("NFKC")
     .replace(/[^\p{L}\p{N}\-_]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  return cleaned || fallback;
+    .replace(/^-+|-+$/g, "");
+  let bounded = "";
+  // Timestamp, UUID and extension must also fit a 255-byte filename.
+  for (const character of [...cleaned].slice(0, 64)) {
+    if (Buffer.byteLength(bounded + character) > 180) break;
+    bounded += character;
+  }
+  return bounded || fallback;
 }
 
 function timestampSlug(date = new Date()) {
@@ -128,6 +133,7 @@ function isWechatUrl(url) {
 }
 
 async function fetchWithFirecrawl(url, key) {
+  if (/[\r\n]/.test(key)) throw new Error("Firecrawl API key must not contain line breaks.");
   const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
   const result = await runProcess(
     "curl",
@@ -138,13 +144,11 @@ async function fetchWithFirecrawl(url, key) {
       "POST",
       "https://api.firecrawl.dev/v1/scrape",
       "-H",
-      `Authorization: Bearer ${key}`,
-      "-H",
-      "Content-Type: application/json",
+      "@-",
       "--data",
       body,
     ],
-    { timeoutMs: 90_000 },
+    { input: `Authorization: Bearer ${key}\nContent-Type: application/json\n`, timeoutMs: 90_000 },
   );
   const parsed = JSON.parse(result.stdout);
   const data = parsed.data || parsed;
@@ -311,4 +315,5 @@ export const __test__ = {
   htmlToText,
   parseEnvFile,
   safePart,
+  fetchWithFirecrawl,
 };

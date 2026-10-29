@@ -4,6 +4,34 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import vm from "node:vm";
 import { serve } from "./forge.mjs";
 
+test("secondary dashboard text has readable contrast on its dark surfaces", async () => {
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  const token = (name) => {
+    const value = html.match(new RegExp(`--${name}:\\s*(#[a-f0-9]{6})`, "i"))?.[1];
+    assert.ok(value, `${name} token must exist`);
+    return value;
+  };
+  const luminance = (color) => {
+    const channels = color.slice(1).match(/../g).map((channel) => {
+      const value = parseInt(channel, 16) / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const foreground = luminance(token("ink3"));
+  for (const background of [token("bg"), token("card"), token("card2"), "#1a1d29"]) {
+    const ratio = (foreground + 0.05) / (luminance(background) + 0.05);
+    assert.ok(ratio >= 4.5, `Secondary text contrast on ${background} is ${ratio.toFixed(2)}:1`);
+  }
+});
+
+test("generation controls have accessible names and announce status changes", async () => {
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(html, /<textarea\b[^>]*id="inp"[^>]*aria-label="[^"]+"/);
+  assert.match(html, /<select\b[^>]*id="engine"[^>]*aria-label="[^"]+"/);
+  assert.match(html, /id="status"[^>]*role="status"/);
+});
+
 async function dashboardContext() {
   const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
   const script = html.match(/<script>([\s\S]*?)<\/script>/i)?.[1];

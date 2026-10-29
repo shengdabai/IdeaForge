@@ -2,6 +2,7 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { constants } from "node:fs";
 import { access, copyFile, lstat, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -412,8 +413,14 @@ function safeFilePart(input, fallback = "page") {
     .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
     .replace(/\s+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 96);
-  return cleaned || fallback;
+    .replace(/^\.+/g, "");
+  let bounded = "";
+  // Leave byte space for the extension and collision suffix on 255-byte filesystems.
+  for (const character of [...cleaned].slice(0, 96)) {
+    if (Buffer.byteLength(bounded + character) > 180) break;
+    bounded += character;
+  }
+  return bounded || fallback;
 }
 
 async function* walkHtmlFiles(dir) {
@@ -441,19 +448,21 @@ function primaryCopyTarget(category, baseName) {
   };
 }
 
-async function availableCopyTarget(primary, usedPaths) {
-  if (!usedPaths.has(primary.relative) && !(await fileExists(primary.absolute))) return primary;
-  let i = 2;
-  while (i <= 9999) {
-    const fileName = `${primary.safeBase}-${i}.html`;
+async function copyToAvailableTarget(source, primary, usedPaths) {
+  await mkdir(primary.targetDir, { recursive: true });
+  for (let i = 1; i <= 9999; i += 1) {
+    const fileName = i === 1 ? `${primary.safeBase}.html` : `${primary.safeBase}-${i}.html`;
     const relative = path.posix.join(path.posix.dirname(primary.relative), fileName);
     const absolute = path.join(primary.targetDir, fileName);
-    if (!usedPaths.has(relative) && !(await fileExists(absolute))) {
+    if (usedPaths.has(relative)) continue;
+    try {
+      await copyFile(source, absolute, constants.COPYFILE_EXCL);
       return { targetDir: primary.targetDir, absolute, relative };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
     }
-    i += 1;
   }
-  throw new Error(`availableCopyTarget: could not find a free filename for "${primary.safeBase}" after 9999 attempts`);
+  throw new Error(`Could not copy "${primary.safeBase}" to a free filename after 9999 attempts.`);
 }
 
 // 外来 html 的 .tag 类语义不可控（常被用作状态徽章），严格清洗：
@@ -484,6 +493,10 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
   const existing = await readPagesJson();
   const existingPaths = new Set(existing.map((item) => item.htmlPath).filter(Boolean));
   const usedPaths = new Set(existingPaths);
+  const sourceIdentity = (source, category) => JSON.stringify([source, category]);
+  const copiedSources = new Set(existing
+    .filter((item) => item.type === "html" && typeof item.source === "string" && item.htmlPath?.startsWith("pages/"))
+    .map((item) => sourceIdentity(item.source, item.category)));
   const imported = [];
   const categoryCounts = new Map();
   const skipped = {
@@ -526,14 +539,14 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
       let htmlPath;
       if (copy) {
         const primary = primaryCopyTarget(pageCategory, path.basename(filePath, path.extname(filePath)));
-        if (existingPaths.has(primary.relative) || usedPaths.has(primary.relative)) {
+        const identity = sourceIdentity(path.resolve(filePath), pageCategory);
+        if (copiedSources.has(identity)) {
           skipped.duplicate += 1;
           continue;
         }
-        const target = await availableCopyTarget(primary, usedPaths);
+        const target = await copyToAvailableTarget(filePath, primary, usedPaths);
         htmlPath = target.relative;
-        await mkdir(target.targetDir, { recursive: true });
-        await copyFile(filePath, target.absolute);
+        copiedSources.add(identity);
       } else {
         htmlPath = path.resolve(filePath);
         if (existingPaths.has(htmlPath) || usedPaths.has(htmlPath)) {
@@ -580,13 +593,61 @@ function contentType(filePath) {
   return "application/octet-stream";
 }
 
-async function readRequestBody(req, limitBytes = 2 * 1024 * 1024) {
-  let body = "";
-  for await (const chunk of req) {
-    body += chunk.toString("utf8");
-    if (Buffer.byteLength(body) > limitBytes) throw new Error("Request body is too large.");
+function requestError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function readRequestBody(req, limitBytes = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    const cleanup = () => {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("aborted", onAborted);
+    };
+    const onError = (error) => { cleanup(); reject(error); };
+    const onAborted = () => onError(requestError(400, "Request body was interrupted."));
+    const onData = (chunk) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > limitBytes) {
+        onError(requestError(413, "Request body is too large."));
+        // Drain the remaining upload so the client can receive the 413 response.
+        req.resume();
+        return;
+      }
+      chunks.push(buffer);
+    };
+    const onEnd = () => {
+      cleanup();
+      req.removeListener("error", onError);
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    // An aborted upload may emit an error afterwards; retain its one-shot handler.
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
+  });
+}
+
+function parseGeneratePayload(body) {
+  let payload;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw requestError(400, "Invalid JSON request body.");
   }
-  return body;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)
+    || typeof payload.input !== "string" || !payload.input.trim()) {
+    throw requestError(400, "Missing or invalid required field: input must be a non-empty string.");
+  }
+  const engine = payload.engine === undefined ? "codex" : payload.engine;
+  if (!["codex", "claude", "ollama"].includes(engine)) {
+    throw requestError(400, "Invalid engine. Expected codex, claude, or ollama.");
+  }
+  return { input: payload.input, engine };
 }
 
 function sendJson(res, statusCode, data) {
@@ -595,7 +656,10 @@ function sendJson(res, statusCode, data) {
 }
 
 function isSensitiveStaticPath(relativePath) {
-  return relativePath.split(/[\\/]+/).some((part) => part.startsWith(".") || SENSITIVE_STATIC_NAMES.has(part.toLowerCase()));
+  return relativePath.split(/[\\/]+/).some((part) => part.startsWith(".")
+    || SENSITIVE_STATIC_NAMES.has(part.toLowerCase())
+    || /^(?:auth\.json|credentials.*|secrets.*|id_rsa.*)$/i.test(part)
+    || /\.(?:key|pem)$/i.test(part));
 }
 
 function isInputArchivePath(relativePath) {
@@ -622,7 +686,12 @@ function isAuthorized(req, token) {
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
-  const pathname = decodeURIComponent(url.pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    throw requestError(400, "Invalid URL encoding.");
+  }
   const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   if (isSensitiveStaticPath(relative) || !isAllowedStaticPath(relative)) {
     res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
@@ -639,7 +708,8 @@ async function serveStatic(req, res) {
     const [rootPath, resolvedFilePath] = await Promise.all([realpath(ROOT), realpath(filePath)]);
     const resolvedRelative = path.relative(rootPath, resolvedFilePath);
     const inputRouteChangedClass = isInputArchivePath(relative) && !isInputArchivePath(resolvedRelative);
-    if (!resolvedRelative || resolvedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(resolvedRelative) || !isAllowedStaticPath(resolvedRelative) || inputRouteChangedClass) {
+    if (!resolvedRelative || resolvedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(resolvedRelative)
+      || isSensitiveStaticPath(resolvedRelative) || !isAllowedStaticPath(resolvedRelative) || inputRouteChangedClass) {
       res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
       res.end("Forbidden");
       return;
@@ -671,16 +741,24 @@ export async function serve({
         res.end("Misdirected request");
         return;
       }
+      if (!req.url.startsWith("/") || req.url.startsWith("//") || req.url.includes("\\")) {
+        throw requestError(400, "Invalid request target.");
+      }
+      const origin = req.headers.origin;
+      const site = req.headers["sec-fetch-site"];
+      if ((origin !== undefined && origin !== `http://${host}`)
+        || (site !== undefined && site !== "same-origin" && site !== "none")) {
+        throw requestError(403, "Only same-origin local requests are allowed.");
+      }
       if (req.method === "POST" && req.url === "/generate") {
         if (!isAuthorized(req, token)) {
           sendJson(res, 401, { error: "Missing or invalid X-Forge-Token." });
           return;
         }
         const body = await readRequestBody(req);
-        const payload = JSON.parse(body || "{}");
-        if (!payload.input || !String(payload.input).trim()) throw new Error("Missing required field: input");
-        const result = await forgePage(String(payload.input), {
-          engine: payload.engine || "codex",
+        const payload = parseGeneratePayload(body);
+        const result = await forgePage(payload.input, {
+          engine: payload.engine,
           ingestOnly: false,
           shouldOpen: false,
         });
@@ -694,7 +772,7 @@ export async function serve({
       res.writeHead(405);
       res.end("Method not allowed");
     } catch (error) {
-      sendJson(res, 500, { error: error.message });
+      sendJson(res, error.statusCode || 500, { error: error.message });
     }
   });
 
@@ -775,4 +853,5 @@ export const __test__ = {
   extractTags,
   writeNewPage,
   archiveReference,
+  readRequestBody,
 };

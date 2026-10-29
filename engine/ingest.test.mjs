@@ -12,9 +12,9 @@ async function withIngestFixture(run) {
     await Promise.all(["ingest.mjs", "forge.mjs", "generate.mjs", "engines.mjs"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
     const modulePath = path.join(root, "engine", "ingest.mjs");
-    const { ingest } = await import(pathToFileURL(modulePath).href);
+    const { ingest, __test__ } = await import(pathToFileURL(modulePath).href);
     const { classifyInput } = await import(pathToFileURL(path.join(root, "engine", "forge.mjs")).href);
-    await run({ root, ingest, classifyInput });
+    await run({ root, ingest, classifyInput, helpers: __test__ });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -46,6 +46,30 @@ test("same-millisecond text ingests retain every distinct source record", async 
         assert.equal(archived.fetchedAt, "2026-10-29T00:00:00.000Z");
       }
     });
+  });
+});
+
+test("Firecrawl credentials go through stdin instead of process arguments", async () => {
+  await withIngestFixture(async ({ root, helpers }) => {
+    const bin = path.join(root, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "curl"), `#!/bin/sh
+case "$*" in *synthetic-private-key*) echo 'Credential appeared in argv' >&2; exit 40;; esac
+headers="$(cat)"
+case "$headers" in *'Authorization: Bearer synthetic-private-key'*) ;; *) exit 41;; esac
+printf '%s' '{"data":{"markdown":"Synthetic article","metadata":{"title":"Synthetic"}}}'
+`);
+    await chmod(path.join(bin, "curl"), 0o700);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath || ""}`;
+    try {
+      const record = await helpers.fetchWithFirecrawl("https://example.com/article", "synthetic-private-key");
+      assert.equal(record.rawContent, "Synthetic article");
+      await assert.rejects(helpers.fetchWithFirecrawl("https://example.com/article", "synthetic\nInjected: header"), /line breaks/);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   });
 });
 
@@ -127,6 +151,31 @@ test("image classification and ingest resolve project-relative paths consistentl
       assert.equal(await classifyInput(`${"Synthetic text ".repeat(30)}.png`), "text");
     } finally {
       process.chdir(previousCwd);
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+});
+
+test("long Chinese image names fit the filesystem archive filename limit", async () => {
+  await withIngestFixture(async ({ root, ingest }) => {
+    const bin = path.join(root, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "curl"), '#!/bin/sh\nprintf \'%s\' \'{"response":"Synthetic long-name OCR"}\'\n');
+    await chmod(path.join(bin, "curl"), 0o700);
+    const imagePath = path.join(root, `${"图".repeat(80)}.svg`);
+    await writeFile(imagePath, '<svg xmlns="http://www.w3.org/2000/svg"><text>Synthetic</text></svg>');
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath || ""}`;
+    try {
+      const record = await ingest(imagePath, "image");
+      for (const file of [record.archivePath, record.archivedImage]) {
+        assert.ok(Buffer.byteLength(path.basename(file)) <= 255);
+        await readFile(file);
+      }
+      assert.equal(record.rawContent, "Synthetic long-name OCR");
+      assert.equal(await readFile(record.archivedImage, "utf8"), await readFile(imagePath, "utf8"));
+    } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
     }
