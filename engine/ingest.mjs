@@ -169,7 +169,7 @@ function htmlToText(html) {
 async function fetchWithCurl(url) {
   const result = await runProcess(
     "curl",
-    ["-sS", "-L", "--fail", "--max-time", "30", "-A", "IdeaForge/1.0 (+local)", url],
+    ["-sS", "-L", "--max-redirs", "5", "--fail", "--max-time", "30", "-A", "IdeaForge/1.0 (+local)", url],
     { timeoutMs: 45_000 },
   );
   const extracted = htmlToText(result.stdout);

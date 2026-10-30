@@ -247,14 +247,17 @@ document.getElementById('go').onclick=async()=>{
   try{
     const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json','X-Forge-Token':dashboardToken},
       body:JSON.stringify({input:v,engine})});
-    if(!res.ok)throw new Error(res.status===401?'令牌已失效，请从当前 forge serve 输出的链接重新打开。':'generate failed');
-    const data=await res.json();
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(res.status===401?'令牌已失效，请从当前 forge serve 输出的链接重新打开。':(data.error||'生成失败，请检查本地服务日志。'));
     statusEl.innerHTML='已生成：<a href="'+escapeHtml(hrefFor(data.htmlPath))+'" style="color:var(--acc)">'+escapeHtml(data.title)+'</a>';
     const fresh=await fetch('pages.json',{cache:'no-store'}).then(r=>r.json());
     load(fresh);
   }catch(e){
-    if(e.message.includes('令牌已失效')){statusEl.textContent=e.message;return;}
-    statusEl.innerHTML='本地服务未启动或生成失败。请在终端运行：<code>node engine/forge.mjs serve</code>，或直接 <code>node engine/forge.mjs "'+escapeHtml(v.slice(0,20))+'…"</code>';
+    if(e instanceof TypeError||/failed to fetch/i.test(String(e.message||''))){
+      statusEl.innerHTML='无法连接本地服务。请在终端运行：<code>node engine/forge.mjs serve</code>，再打开命令输出的完整链接。';
+      return;
+    }
+    statusEl.textContent=e.message||'本地服务未启动或生成失败。';
   }
 };
 </script>
