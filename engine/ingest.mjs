@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -7,6 +9,21 @@ import { homedir } from "node:os";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const INPUTS_DIR = path.join(ROOT, "inputs");
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"]);
+
+export async function resolveImagePath(input) {
+  const value = String(input || "").trim();
+  // Preserve project-relative lookup before caller-relative lookup in both stages.
+  for (const candidate of new Set([path.resolve(ROOT, value), path.resolve(value)])) {
+    if (!IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase())) continue;
+    try {
+      if ((await stat(candidate)).isFile()) return candidate;
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR", "ENAMETOOLONG"].includes(error.code)) throw error;
+    }
+  }
+  return "";
+}
 
 function runProcess(command, args, { input, timeoutMs = 45_000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -49,9 +66,14 @@ function safePart(input, fallback = "input") {
   const cleaned = String(input || "")
     .normalize("NFKC")
     .replace(/[^\p{L}\p{N}\-_]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  return cleaned || fallback;
+    .replace(/^-+|-+$/g, "");
+  let bounded = "";
+  // Timestamp, UUID and extension must also fit a 255-byte filename.
+  for (const character of [...cleaned].slice(0, 64)) {
+    if (Buffer.byteLength(bounded + character) > 180) break;
+    bounded += character;
+  }
+  return bounded || fallback;
 }
 
 function timestampSlug(date = new Date()) {
@@ -64,8 +86,8 @@ async function ensureInputsDir() {
 
 async function archiveRecord(record, label) {
   await ensureInputsDir();
-  const file = path.join(INPUTS_DIR, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}.json`);
-  await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  const file = path.join(INPUTS_DIR, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}-${randomUUID()}.json`);
+  await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
   return file;
 }
 
@@ -111,6 +133,7 @@ function isWechatUrl(url) {
 }
 
 async function fetchWithFirecrawl(url, key) {
+  if (/[\r\n]/.test(key)) throw new Error("Firecrawl API key must not contain line breaks.");
   const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
   const result = await runProcess(
     "curl",
@@ -121,13 +144,11 @@ async function fetchWithFirecrawl(url, key) {
       "POST",
       "https://api.firecrawl.dev/v1/scrape",
       "-H",
-      `Authorization: Bearer ${key}`,
-      "-H",
-      "Content-Type: application/json",
+      "@-",
       "--data",
       body,
     ],
-    { timeoutMs: 90_000 },
+    { input: `Authorization: Bearer ${key}\nContent-Type: application/json\n`, timeoutMs: 90_000 },
   );
   const parsed = JSON.parse(result.stdout);
   const data = parsed.data || parsed;
@@ -232,10 +253,11 @@ async function describeImageWithOllama(imagePath) {
 }
 
 async function ingestImage(input) {
-  const imagePath = path.resolve(input);
+  const imagePath = await resolveImagePath(input);
+  if (!imagePath) throw new Error(`Image input is not an existing image file: ${input}`);
   await ensureInputsDir();
-  const archivedImage = path.join(INPUTS_DIR, `${timestampSlug()}-${safePart(path.basename(imagePath), "image")}${path.extname(imagePath)}`);
-  await copyFile(imagePath, archivedImage);
+  const archivedImage = path.join(INPUTS_DIR, `${timestampSlug()}-${safePart(path.basename(imagePath), "image")}-${randomUUID()}${path.extname(imagePath)}`);
+  await copyFile(imagePath, archivedImage, constants.COPYFILE_EXCL);
 
   let rawContent = "";
   try {
@@ -293,4 +315,5 @@ export const __test__ = {
   htmlToText,
   parseEnvFile,
   safePart,
+  fetchWithFirecrawl,
 };

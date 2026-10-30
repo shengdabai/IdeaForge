@@ -6,7 +6,7 @@
 <title>想法工坊 · IdeaForge</title>
 <style>
   :root{--bg:#0d0e12;--card:#181a22;--card2:#1e2129;--line:#262a35;--ink:#e8eaf0;
-    --ink2:#a7adbd;--ink3:#6f7689;--acc:#7c9cff;--acc2:#5ad1c4;--warn:#f3c66b;--r:16px;
+    --ink2:#a7adbd;--ink3:#939bad;--acc:#7c9cff;--acc2:#5ad1c4;--warn:#f3c66b;--r:16px;
     --sans:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;--serif:"Songti SC",serif}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:radial-gradient(1200px 600px at 80% -10%,#1a1d29,var(--bg) 55%);color:var(--ink);
@@ -15,7 +15,7 @@
   header{padding:58px 0 30px;border-bottom:1px solid var(--line);margin-bottom:32px}
   .kicker{font-size:13px;letter-spacing:.14em;color:var(--acc);text-transform:uppercase;font-weight:600}
   h1{font-family:var(--serif);font-size:clamp(32px,5vw,48px);margin:14px 0 12px;
-    background:linear-gradient(180deg,#fff,#b9c0d4);-webkit-background-clip:text;background-clip:text;color:transparent}
+    color:var(--ink)}
   .sub{color:var(--ink2);font-size:17px;max-width:720px}
   .composer{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:20px;margin:30px 0 16px}
   .composer textarea,.search input{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:12px;
@@ -83,17 +83,17 @@
     <p class="sub">丢进一句话、一张图、一个链接，自动炼成一张专业、可视化、并结合你处境给出启发的深度页面。所有内容存在本地，归你所有。</p>
 
     <div class="composer">
-      <textarea id="inp" placeholder="贴一段想法、一个网页链接，或一张图片的路径…"></textarea>
+      <textarea id="inp" aria-label="输入想法、网址或图片路径" placeholder="贴一段想法、一个网页链接，或一张图片的路径…"></textarea>
       <div class="row">
         <span class="hint">自动识别 文字 / 网址 / 图片</span>
-        <select id="engine">
+        <select id="engine" aria-label="生成引擎">
           <option value="codex">引擎：Codex（默认 · 省额度）</option>
           <option value="ollama">引擎：本地 Ollama（离线免费）</option>
           <option value="claude">引擎：Claude（6/15 起独立计费）</option>
         </select>
         <button id="go">炼成页面</button>
       </div>
-      <div class="note" id="status">提示：请从 <code>forge serve</code> 输出的本地链接打开此页，输入框才可安全生成；也可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
+      <div class="note" id="status" role="status">提示：请从 <code>forge serve</code> 输出的本地链接打开此页，输入框才可安全生成；也可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
     </div>
   </header>
 
@@ -150,9 +150,10 @@ function pageText(p){
 }
 function hrefFor(htmlPath){
   const value=String(htmlPath||'#');
+  if(value==='#')return value;
   if(value.startsWith('file://')||/^[a-z]+:\/\//i.test(value))return value;
   if(value.startsWith('/'))return 'file://'+value.split('/').map(encodeURIComponent).join('/');
-  return value;
+  return value.split('/').map(encodeURIComponent).join('/');
 }
 function typeName(type){
   return ({url:'网页',text:'想法',image:'图片',html:'HTML'})[type]||type||'页面';
