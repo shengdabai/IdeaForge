@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { constants } from "node:fs";
-import { access, copyFile, lstat, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, open, opendir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ingest, resolveImagePath } from "./ingest.mjs";
@@ -17,6 +17,10 @@ const INPUTS_DIR = path.join(ROOT, "inputs");
 const DEFAULT_PORT = 8765;
 const DEFAULT_CATEGORY = "炼金成品";
 const INDEX_LOCK_TIMEOUT_MS = 5_000;
+// A lock file that is empty or unparseable is only treated as abandoned once it
+// is older than this. A live writer fills the metadata microseconds after the
+// exclusive create, so anything this old without valid metadata is debris.
+const UNREADABLE_LOCK_MAX_AGE_MS = 60_000;
 const SENSITIVE_STATIC_NAMES = new Set(["token", "forge-token", "forge.token", "dashboard-token", "dashboard.token"]);
 const EXTENSION_FRAGMENT_NAMES = new Set([
   "popup.html",
@@ -33,7 +37,7 @@ function usage() {
   return [
     "Usage:",
     '  node engine/forge.mjs [--engine=codex|claude|ollama] [--ingest-only] "想法/URL/图片路径"',
-    "  node engine/forge.mjs import <dir> [--category=名] [--copy|--link] [--exclude=glob,glob]",
+    "  node engine/forge.mjs import <dir> [--category=名] [--link(默认，登记原路径)|--copy] [--exclude=glob,glob]",
     "  node engine/forge.mjs serve [--port=8765]",
     "  node engine/forge.mjs --self-test",
   ].join("\n");
@@ -63,7 +67,7 @@ export function parseArgs(argv) {
     input: "",
     importDir: "",
     importCategory: "",
-    importCopy: true,
+    importCopy: false,
     importExclude: "",
     port: DEFAULT_PORT,
     selfTest: false,
@@ -177,8 +181,13 @@ async function readPagesJson(indexPath = PAGES_JSON) {
 async function writePagesJson(list, indexPath = PAGES_JSON) {
   const directory = path.dirname(indexPath);
   const temporaryPath = path.join(directory, `.${path.basename(indexPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-  await writeFile(temporaryPath, `${JSON.stringify(list.map(normalizePageEntry), null, 2)}\n`, "utf8");
-  await rename(temporaryPath, indexPath);
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(list.map(normalizePageEntry), null, 2)}\n`, "utf8");
+    await rename(temporaryPath, indexPath);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
 }
 
 function normalizePageEntry(entry) {
@@ -195,6 +204,7 @@ function wait(milliseconds) {
 async function acquireIndexLock(indexPath) {
   const lockPath = `${indexPath}.lock`;
   const deadline = Date.now() + INDEX_LOCK_TIMEOUT_MS;
+  let lastHolder = "unknown";
   while (true) {
     try {
       const handle = await open(lockPath, "wx", 0o600);
@@ -208,37 +218,95 @@ async function acquireIndexLock(indexPath) {
       return { lockPath, handle };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      if (await removeAbandonedIndexLock(lockPath)) continue;
-      if (Date.now() >= deadline) throw new Error(`Timed out waiting for pages index lock: ${lockPath}`);
+      const verdict = await inspectIndexLock(lockPath);
+      lastHolder = verdict.reason;
+      if (verdict.gone) continue;
+      if (verdict.abandoned && (await removeIndexLockIfUnchanged(lockPath, verdict.snapshot))) {
+        console.error(`[IdeaForge] reclaimed abandoned index lock (${verdict.reason}): ${lockPath}`);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for pages index lock (${lastHolder}): ${lockPath}`);
+      }
       await wait(25 + Math.floor(Math.random() * 25));
     }
   }
 }
 
-async function removeAbandonedIndexLock(lockPath) {
+function runPs(args) {
+  return new Promise((resolve) => {
+    execFile("/bin/ps", args, { env: { ...process.env, LC_ALL: "C" }, timeout: 2_000 }, (error, stdout) => {
+      resolve(error ? null : String(stdout).trim());
+    });
+  });
+}
+
+// ps etime is [[dd-]hh:]mm:ss
+function parseElapsedSeconds(text) {
+  const match = String(text || "").trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!match) return null;
+  const [, days = "0", hours = "0", minutes, seconds] = match;
+  return ((Number(days) * 24 + Number(hours)) * 60 + Number(minutes)) * 60 + Number(seconds);
+}
+
+// Is a live PID provably NOT the process that created this lock?
+// Proof 1: its command line does not mention node at all (the engine always runs under node).
+// Proof 2: it started after the lock was created (the PID was reused).
+// Anything we cannot prove (ps failed, a node process older than the lock) is treated
+// as the rightful owner and is never stolen, however old the lock is.
+async function liveHolderIsForeign(pid, lockCreatedAtMs) {
+  if (pid === process.pid) return { foreign: false, why: "held by this process" };
+  const command = await runPs(["-ww", "-o", "command=", "-p", String(pid)]);
+  if (!command) return { foreign: false, why: `pid ${pid} alive, command line unknown` };
+  if (!/\bnode\b/.test(command)) return { foreign: true, why: `pid ${pid} alive but is not a node process` };
+  const elapsed = parseElapsedSeconds(await runPs(["-o", "etime=", "-p", String(pid)]));
+  if (elapsed !== null && Number.isFinite(lockCreatedAtMs)) {
+    const startedAtMs = Date.now() - elapsed * 1000;
+    // etime has 1 s resolution; allow 2 s of slack before calling it a reused PID.
+    if (startedAtMs > lockCreatedAtMs + 2_000) {
+      return { foreign: true, why: `pid ${pid} started after the lock was created (pid reused)` };
+    }
+  }
+  return { foreign: false, why: `pid ${pid} alive (node)` };
+}
+
+async function inspectIndexLock(lockPath) {
   let snapshot;
   try {
     snapshot = await lstat(lockPath);
-    let metadata;
-    try {
-      metadata = JSON.parse(await readFile(lockPath, "utf8"));
-    } catch {
-      // An empty or partial lock may still belong to a live process paused
-      // between exclusive creation and metadata write. Fail closed.
-      return false;
-    }
-    if (!Number.isSafeInteger(metadata.pid) || metadata.pid <= 0) return false;
-    try {
-      process.kill(metadata.pid, 0);
-      return false;
-    } catch (error) {
-      if (error.code !== "ESRCH") return false;
-    }
   } catch (error) {
-    if (error.code === "ENOENT") return true;
-    return false;
+    if (error.code === "ENOENT") return { abandoned: false, gone: true, reason: "lock vanished" };
+    return { abandoned: false, reason: `lock unreadable: ${error.code || error.message}` };
   }
+  const ageMs = Date.now() - snapshot.mtimeMs;
+  let metadata = null;
+  try {
+    metadata = JSON.parse(await readFile(lockPath, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return { abandoned: false, gone: true, reason: "lock vanished" };
+  }
+  const pid = metadata && Number.isSafeInteger(metadata.pid) && metadata.pid > 0 ? metadata.pid : null;
+  if (pid === null) {
+    // Empty/partial/garbage lock: it may belong to a writer paused between the
+    // exclusive create and the metadata write, so only reclaim it once clearly old.
+    if (ageMs > UNREADABLE_LOCK_MAX_AGE_MS) {
+      return { abandoned: true, snapshot, reason: `unreadable lock older than ${Math.round(UNREADABLE_LOCK_MAX_AGE_MS / 1000)}s` };
+    }
+    return { abandoned: false, snapshot, reason: `unreadable lock, age ${Math.round(ageMs / 1000)}s` };
+  }
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code === "ESRCH") return { abandoned: true, snapshot, reason: `owner pid ${pid} is dead` };
+    if (error.code !== "EPERM") return { abandoned: false, snapshot, reason: `cannot probe pid ${pid}: ${error.code}` };
+    // EPERM: alive but owned by another user; fall through to the foreign check.
+  }
+  const createdAtMs = Date.parse(metadata.createdAt);
+  const holder = await liveHolderIsForeign(pid, Number.isFinite(createdAtMs) ? createdAtMs : snapshot.mtimeMs);
+  return { abandoned: holder.foreign, snapshot, reason: holder.why };
+}
 
+async function removeIndexLockIfUnchanged(lockPath, snapshot) {
   try {
     const current = await lstat(lockPath);
     if (current.dev !== snapshot.dev || current.ino !== snapshot.ino) return false;
@@ -249,10 +317,49 @@ async function removeAbandonedIndexLock(lockPath) {
   }
 }
 
+// Temp files are only written while the index lock is held, so a temp file seen
+// while we hold the lock was left by a writer that died mid-write. Remove those
+// whose writer PID is dead; report any other one on stderr and leave it alone.
+async function cleanOrphanTempFiles(indexPath) {
+  const directory = path.dirname(indexPath);
+  const prefix = `.${path.basename(indexPath)}.`;
+  let names;
+  try {
+    names = await readdir(directory);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+    const pid = Number(name.slice(prefix.length).split(".")[0]);
+    if (pid === process.pid) continue;
+    const fullPath = path.join(directory, name);
+    let dead = false;
+    if (Number.isSafeInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        dead = error.code === "ESRCH";
+      }
+    }
+    if (!dead) {
+      console.error(`[IdeaForge] warning: index temp file not removed (writer pid ${pid} not proven dead): ${fullPath}`);
+      continue;
+    }
+    try {
+      await unlink(fullPath);
+      console.error(`[IdeaForge] removed orphan index temp file left by dead pid ${pid}: ${fullPath}`);
+    } catch (error) {
+      if (error.code !== "ENOENT") console.error(`[IdeaForge] could not remove orphan temp file ${fullPath}: ${error.message}`);
+    }
+  }
+}
+
 export async function updatePagesIndex(update, { indexPath = PAGES_JSON } = {}) {
   await mkdir(path.dirname(indexPath), { recursive: true });
   const lock = await acquireIndexLock(indexPath);
   try {
+    await cleanOrphanTempFiles(indexPath);
     const current = await readPagesJson(indexPath);
     const next = await update(current);
     if (!Array.isArray(next)) throw new Error("pages index update must return an array.");
@@ -278,14 +385,24 @@ export async function appendPageIndex(entry) {
   });
 }
 
+// Append-only: existing entries (and any extra fields on them, e.g. stale or remap
+// markers) are never replaced or collapsed. A new entry whose identity already
+// exists in the index read under the lock is skipped. Returns the entries added.
 async function appendPageIndexes(entries) {
-  if (!entries.length) return;
+  const added = [];
+  if (!entries.length) return added;
   await updatePagesIndex((list) => {
     const entryKey = (item) => item.htmlPath ? `path:${item.htmlPath}` : `slug:${item.slug}`;
-    const byIdentity = new Map(list.map((item) => [entryKey(item), item]));
-    for (const entry of entries) byIdentity.set(entryKey(entry), entry);
-    return [...byIdentity.values()];
+    const present = new Set(list.map(entryKey));
+    for (const entry of entries) {
+      const key = entryKey(entry);
+      if (present.has(key)) continue;
+      present.add(key);
+      added.push(entry);
+    }
+    return [...list, ...added];
   });
+  return added;
 }
 
 function sourceFromRecord(record) {
@@ -479,8 +596,9 @@ function sanitizeImportTags(html, category) {
   return [...new Set([category, ...cleaned])].filter(Boolean).slice(0, 5);
 }
 
+// Default (copy) mode copies the HTML into pages/<category>/ so the archive is
+// self-contained; --link registers the original absolute path instead.
 export async function importPages(dir, { category = "", copy = true, exclude = "" } = {}) {
-  if (!copy) console.warn("[import] --link indexes local paths only; HTTP dashboard browsers cannot open file:// links. Omit --link to copy portable HTML.");
   const importRoot = path.resolve(dir || "");
   const info = await stat(importRoot);
   const isSingleFile = info.isFile() && path.extname(importRoot).toLowerCase() === ".html";
@@ -571,18 +689,20 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
       categoryCounts.set(pageCategory, (categoryCounts.get(pageCategory) || 0) + 1);
     } catch (error) {
       skipped.error += 1;
-      console.warn(`[import] skipped ${filePath}: ${error.message}`);
+      console.error(`[import] failed ${filePath}: ${error.message}`);
     }
   }
 
-  await appendPageIndexes(imported);
+  const added = await appendPageIndexes(imported);
+  // Entries another writer registered between our scan and taking the lock.
+  skipped.duplicate += imported.length - added.length;
 
   const skippedTotal = Object.values(skipped).reduce((a, b) => a + b, 0);
-  console.log(`[import] done: imported ${imported.length}, skipped ${skippedTotal}, scanned ${scanned}`);
+  console.log(`[import] done: imported ${added.length}, skipped ${skippedTotal}, scanned ${scanned}`);
   for (const [name, value] of [...categoryCounts.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh-Hans"))) {
     console.log(`[import] category ${name}: ${value}`);
   }
-  return { imported: imported.length, skipped, scanned, categoryCounts: Object.fromEntries(categoryCounts) };
+  return { imported: added.length, skipped, scanned, categoryCounts: Object.fromEntries(categoryCounts) };
 }
 
 function contentType(filePath) {
@@ -664,6 +784,25 @@ function isSensitiveStaticPath(relativePath) {
     || /\.(?:key|pem)$/i.test(part));
 }
 
+// DNS-rebinding / cross-site guard (ported from the live engine): every request,
+// GET included, must address the loopback listener by its own host:port, and any
+// Origin / Sec-Fetch-Site header must say same-origin. The one exception is a
+// top-level document navigation (a user clicking a link from another local tool):
+// read-only GETs are already protected by CORS and /generate by the header token.
+function isTrustedLocalRequest(req) {
+  // A wrong Host is answered with 421 by the request handler, so it is not rejected here.
+  const host = typeof req.headers.host === "string" ? req.headers.host : "";
+  if (typeof req.url !== "string" || !req.url.startsWith("/") || req.url.startsWith("//") || req.url.includes("\\")) return false;
+  const isDocumentNavigation = req.method === "GET"
+    && req.headers["sec-fetch-mode"] === "navigate"
+    && req.headers["sec-fetch-dest"] === "document";
+  if (isDocumentNavigation) return true;
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== `http://${host.toLowerCase()}`) return false;
+  const site = req.headers["sec-fetch-site"];
+  return site === undefined || site === "same-origin" || site === "none";
+}
+
 function isInputArchivePath(relativePath) {
   const normalized = relativePath.split(path.sep).join("/");
   return /^inputs\/[^/]+\.json$/iu.test(normalized);
@@ -734,6 +873,10 @@ export async function serve({
 } = {}) {
   if (typeof token !== "string" || !token) throw new Error("Dashboard token must be a non-empty string.");
   const server = http.createServer(async (req, res) => {
+    if (!isTrustedLocalRequest(req)) {
+      sendJson(res, 403, { error: "Only trusted loopback requests are allowed" });
+      return;
+    }
     try {
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : port;
@@ -798,6 +941,9 @@ async function selfTest() {
   assert(parseArgs(["--engine=ollama", "--ingest-only", "hello"]).engine === "ollama", "engine parse");
   assert(parseArgs(["serve", "--port=9999"]).command === "serve", "serve command parse");
   assert(parseArgs(["import", "./x", "--category=资料", "--copy", "--exclude=popup.html"]).command === "import", "import command parse");
+  assert(parseArgs(["import", "./x"]).importCopy === false, "import defaults to link (register original path)");
+  assert(parseArgs(["import", "./x", "--copy"]).importCopy === true, "--copy opts into copying");
+  assert(parseArgs(["serve"]).port === 8765, "default port 8765");
   assert(parseArgs(["a", "b"]).input === "a b", "input join parse");
   assert((await classifyInput("https://example.com")) === "url", "url classify");
   assert((await classifyInput("一句纯文字想法")) === "text", "text classify");
@@ -824,11 +970,15 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    await importPages(args.importDir, {
+    const result = await importPages(args.importDir, {
       category: args.importCategory,
       copy: args.importCopy,
       exclude: args.importExclude,
     });
+    if (result.skipped.error > 0) {
+      console.error(`[IdeaForge] import finished with ${result.skipped.error} error(s); see messages above.`);
+      process.exitCode = 1;
+    }
     return;
   }
   if (!args.input) {
