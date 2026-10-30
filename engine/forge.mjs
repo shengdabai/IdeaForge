@@ -37,7 +37,7 @@ function usage() {
   return [
     "Usage:",
     '  node engine/forge.mjs [--engine=codex|claude|ollama] [--ingest-only] "想法/URL/图片路径"',
-    "  node engine/forge.mjs import <dir> [--category=名] [--link(默认，登记原路径)|--copy] [--exclude=glob,glob]",
+    "  node engine/forge.mjs import <dir> [--category=名] [--copy(默认，复制进 pages/)|--link(登记原路径)] [--exclude=glob,glob]",
     "  node engine/forge.mjs serve [--port=8765]",
     "  node engine/forge.mjs --self-test",
   ].join("\n");
