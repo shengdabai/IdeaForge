@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { access, copyFile, mkdir, opendir, readFile, stat, writeFile } from "node:fs/promises";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { access, copyFile, lstat, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ingest } from "./ingest.mjs";
@@ -13,6 +14,8 @@ const PAGES_DIR = path.join(ROOT, "pages");
 const PAGES_JSON = path.join(ROOT, "pages.json");
 const DEFAULT_PORT = 8765;
 const DEFAULT_CATEGORY = "炼金成品";
+const INDEX_LOCK_TIMEOUT_MS = 5_000;
+const SENSITIVE_STATIC_NAMES = new Set(["token", "forge-token", "forge.token", "dashboard-token", "dashboard.token"]);
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"]);
 const EXTENSION_FRAGMENT_NAMES = new Set([
   "popup.html",
@@ -144,9 +147,24 @@ async function uniquePagePath(baseSlug) {
   return { slug, filePath };
 }
 
-async function readPagesJson() {
+async function writeNewPage(baseSlug, html, { pagesDir = PAGES_DIR } = {}) {
+  await mkdir(pagesDir, { recursive: true });
+  for (let i = 1; i < 10_000; i += 1) {
+    const slug = i === 1 ? baseSlug : `${baseSlug}-${i}`;
+    const filePath = path.join(pagesDir, `${slug}.html`);
+    try {
+      await writeFile(filePath, html, { encoding: "utf8", flag: "wx" });
+      return { slug, filePath };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error(`Could not allocate a unique page filename for: ${baseSlug}`);
+}
+
+async function readPagesJson(indexPath = PAGES_JSON) {
   try {
-    const text = await readFile(PAGES_JSON, "utf8");
+    const text = await readFile(indexPath, "utf8");
     const parsed = JSON.parse(text);
     if (!Array.isArray(parsed)) throw new Error("pages.json must be an array.");
     return parsed.map(normalizePageEntry);
@@ -156,8 +174,11 @@ async function readPagesJson() {
   }
 }
 
-async function writePagesJson(list) {
-  await writeFile(PAGES_JSON, `${JSON.stringify(list.map(normalizePageEntry), null, 2)}\n`, "utf8");
+async function writePagesJson(list, indexPath = PAGES_JSON) {
+  const directory = path.dirname(indexPath);
+  const temporaryPath = path.join(directory, `.${path.basename(indexPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  await writeFile(temporaryPath, `${JSON.stringify(list.map(normalizePageEntry), null, 2)}\n`, "utf8");
+  await rename(temporaryPath, indexPath);
 }
 
 function normalizePageEntry(entry) {
@@ -167,11 +188,104 @@ function normalizePageEntry(entry) {
   };
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function acquireIndexLock(indexPath) {
+  const lockPath = `${indexPath}.lock`;
+  const deadline = Date.now() + INDEX_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+      } catch (error) {
+        await handle.close();
+        await unlink(lockPath).catch(() => {});
+        throw error;
+      }
+      return { lockPath, handle };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (await removeAbandonedIndexLock(lockPath)) continue;
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for pages index lock: ${lockPath}`);
+      await wait(25 + Math.floor(Math.random() * 25));
+    }
+  }
+}
+
+async function removeAbandonedIndexLock(lockPath) {
+  let snapshot;
+  try {
+    snapshot = await lstat(lockPath);
+    let metadata;
+    try {
+      metadata = JSON.parse(await readFile(lockPath, "utf8"));
+    } catch {
+      // An empty or partial lock may still belong to a live process paused
+      // between exclusive creation and metadata write. Fail closed.
+      return false;
+    }
+    if (!Number.isSafeInteger(metadata.pid) || metadata.pid <= 0) return false;
+    try {
+      process.kill(metadata.pid, 0);
+      return false;
+    } catch (error) {
+      if (error.code !== "ESRCH") return false;
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    return false;
+  }
+
+  try {
+    const current = await lstat(lockPath);
+    if (current.dev !== snapshot.dev || current.ino !== snapshot.ino) return false;
+    await unlink(lockPath);
+    return true;
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+
+export async function updatePagesIndex(update, { indexPath = PAGES_JSON } = {}) {
+  await mkdir(path.dirname(indexPath), { recursive: true });
+  const lock = await acquireIndexLock(indexPath);
+  try {
+    const current = await readPagesJson(indexPath);
+    const next = await update(current);
+    if (!Array.isArray(next)) throw new Error("pages index update must return an array.");
+    await writePagesJson(next, indexPath);
+    return next;
+  } finally {
+    await lock.handle.close();
+    try {
+      await unlink(lock.lockPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+}
+
 export async function appendPageIndex(entry) {
-  const list = await readPagesJson();
-  const withoutSameSlug = list.filter((item) => item.slug !== entry.slug);
-  withoutSameSlug.push(entry);
-  await writePagesJson(withoutSameSlug);
+  await updatePagesIndex((list) => {
+    const withoutSameEntry = list.filter((item) => {
+      if (entry.htmlPath) return item.htmlPath !== entry.htmlPath;
+      return item.slug !== entry.slug;
+    });
+    return [...withoutSameEntry, entry];
+  });
+}
+
+async function appendPageIndexes(entries) {
+  if (!entries.length) return;
+  await updatePagesIndex((list) => {
+    const entryKey = (item) => item.htmlPath ? `path:${item.htmlPath}` : `slug:${item.slug}`;
+    const byIdentity = new Map(list.map((item) => [entryKey(item), item]));
+    for (const entry of entries) byIdentity.set(entryKey(entry), entry);
+    return [...byIdentity.values()];
+  });
 }
 
 function sourceFromRecord(record) {
@@ -193,8 +307,7 @@ export async function forge(input, { engine = "codex", ingestOnly = false, shoul
 
   const html = await generateHtml(record, engine);
   const title = extractTitle(html, record.title);
-  const { slug, filePath } = await uniquePagePath(slugify(title, slugify(record.title, "page")));
-  await writeFile(filePath, html, "utf8");
+  const { slug, filePath } = await writeNewPage(slugify(title, slugify(record.title, "page")), html);
 
   const entry = {
     slug,
@@ -399,11 +512,7 @@ export async function importPages(dir, { category = "", copy = false, exclude = 
     }
   }
 
-  if (imported.length) {
-    await writePagesJson([...existing, ...imported]);
-  } else {
-    await writePagesJson(existing);
-  }
+  await appendPageIndexes(imported);
 
   const skippedTotal = Object.values(skipped).reduce((a, b) => a + b, 0);
   console.log(`[import] done: imported ${imported.length}, skipped ${skippedTotal}, scanned ${scanned}`);
@@ -433,14 +542,39 @@ async function readRequestBody(req, limitBytes = 2 * 1024 * 1024) {
 }
 
 function sendJson(res, statusCode, data) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   res.end(`${JSON.stringify(data, null, 2)}\n`);
+}
+
+function isSensitiveStaticPath(relativePath) {
+  return relativePath.split(/[\\/]+/).some((part) => part.startsWith(".") || SENSITIVE_STATIC_NAMES.has(part.toLowerCase()));
+}
+
+function isAllowedStaticPath(relativePath) {
+  const normalized = relativePath.split(path.sep).join("/");
+  return normalized === "index.html"
+    || normalized === "pages.json"
+    || normalized.startsWith("pages/")
+    || normalized.startsWith("templates/");
+}
+
+function isAuthorized(req, token) {
+  const supplied = req.headers["x-forge-token"];
+  if (typeof supplied !== "string") return false;
+  const expectedBuffer = Buffer.from(token);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
   const pathname = decodeURIComponent(url.pathname);
   const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  if (isSensitiveStaticPath(relative) || !isAllowedStaticPath(relative)) {
+    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+    res.end("Forbidden");
+    return;
+  }
   const filePath = path.resolve(ROOT, relative);
   if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) {
     res.writeHead(403);
@@ -448,10 +582,17 @@ async function serveStatic(req, res) {
     return;
   }
   try {
-    const info = await stat(filePath);
+    const [rootPath, resolvedFilePath] = await Promise.all([realpath(ROOT), realpath(filePath)]);
+    const resolvedRelative = path.relative(rootPath, resolvedFilePath);
+    if (!resolvedRelative || resolvedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(resolvedRelative) || !isAllowedStaticPath(resolvedRelative)) {
+      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+      res.end("Forbidden");
+      return;
+    }
+    const info = await stat(resolvedFilePath);
     if (!info.isFile()) throw new Error("Not a file.");
-    const body = await readFile(filePath);
-    res.writeHead(200, { "Content-Type": contentType(filePath), "Cache-Control": "no-store" });
+    const body = await readFile(resolvedFilePath);
+    res.writeHead(200, { "Content-Type": contentType(resolvedFilePath), "Cache-Control": "no-store" });
     res.end(body);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -459,14 +600,23 @@ async function serveStatic(req, res) {
   }
 }
 
-export async function serve({ port = DEFAULT_PORT } = {}) {
+export async function serve({
+  port = DEFAULT_PORT,
+  token = process.env.IDEAFORGE_DASHBOARD_TOKEN || randomBytes(32).toString("base64url"),
+  forgePage = forge,
+} = {}) {
+  if (typeof token !== "string" || !token) throw new Error("Dashboard token must be a non-empty string.");
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === "POST" && req.url === "/generate") {
+        if (!isAuthorized(req, token)) {
+          sendJson(res, 401, { error: "Missing or invalid X-Forge-Token." });
+          return;
+        }
         const body = await readRequestBody(req);
         const payload = JSON.parse(body || "{}");
         if (!payload.input || !String(payload.input).trim()) throw new Error("Missing required field: input");
-        const result = await forge(String(payload.input), {
+        const result = await forgePage(String(payload.input), {
           engine: payload.engine || "codex",
           ingestOnly: false,
           shouldOpen: false,
@@ -489,7 +639,9 @@ export async function serve({ port = DEFAULT_PORT } = {}) {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", resolve);
   });
-  console.log(`IdeaForge serving at http://127.0.0.1:${port}`);
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  console.log(`IdeaForge serving at http://127.0.0.1:${actualPort}/#forge-token=${encodeURIComponent(token)}`);
   return server;
 }
 
@@ -558,4 +710,5 @@ export const __test__ = {
   slugify,
   extractTitle,
   extractTags,
+  writeNewPage,
 };

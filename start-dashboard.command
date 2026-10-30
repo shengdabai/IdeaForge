@@ -9,7 +9,28 @@ if lsof -ti :$PORT >/dev/null 2>&1; then
   echo "Port $PORT is busy; trying $((PORT+1)) instead."
   PORT=$((PORT+1))
 fi
-echo "IdeaForge starting… http://127.0.0.1:$PORT/"
-# open the browser after the server is up
-( sleep 1.5; open "http://127.0.0.1:$PORT/" ) &
-exec node engine/forge.mjs serve --port=$PORT
+echo "IdeaForge starting…"
+# The server emits a one-time Dashboard URL containing an auth token in its
+# fragment. Wait for that exact URL rather than opening the unauthenticated root.
+LOG_FILE="$(mktemp -t ideaforge-dashboard)" || exit 1
+trap 'rm -f "$LOG_FILE"' EXIT
+node engine/forge.mjs serve --port=$PORT >"$LOG_FILE" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 1 50); do
+  DASHBOARD_URL="$(awk '/^IdeaForge serving at / { sub(/^IdeaForge serving at /, ""); print; exit }' "$LOG_FILE")"
+  if [ -n "$DASHBOARD_URL" ]; then
+    open "$DASHBOARD_URL"
+    break
+  fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+
+if [ -z "$DASHBOARD_URL" ]; then
+  echo "IdeaForge failed to start:"
+  sed -n '1,80p' "$LOG_FILE"
+fi
+wait "$SERVER_PID"
