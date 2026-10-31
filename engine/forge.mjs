@@ -358,19 +358,31 @@ async function cleanOrphanTempFiles(indexPath) {
 export async function updatePagesIndex(update, { indexPath = PAGES_JSON } = {}) {
   await mkdir(path.dirname(indexPath), { recursive: true });
   const lock = await acquireIndexLock(indexPath);
+  let written = false;
   try {
     await cleanOrphanTempFiles(indexPath);
     const current = await readPagesJson(indexPath);
     const next = await update(current);
     if (!Array.isArray(next)) throw new Error("pages index update must return an array.");
     await writePagesJson(next, indexPath);
+    written = true;
     return next;
   } finally {
     await lock.handle.close();
     try {
       await unlink(lock.lockPath);
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (error.code !== "ENOENT") {
+        // A lock left behind blocks later writers, so never drop this silently. But a throw
+        // here would replace the body's own error, so only throw when the body succeeded.
+        if (written) {
+          throw new Error(
+            `pages index was written, but its lock file could not be removed (${error.code || error.message}): ${lock.lockPath}`,
+            { cause: error },
+          );
+        }
+        console.warn(`[IdeaForge] warning: could not remove pages index lock after a failed update (${error.code || error.message}): ${lock.lockPath}`);
+      }
     }
   }
 }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises, { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -185,6 +186,81 @@ test("an index lock left by a dead process is recovered", async () => {
     await updatePagesIndex((current) => [...current, { slug: "recovered", title: "Recovered" }], { indexPath });
     const indexed = JSON.parse(await readFile(indexPath, "utf8"));
     assert.deepEqual(indexed.map((entry) => entry.slug), ["recovered"]);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+// forge.mjs imports unlink from node:fs/promises as a named binding. Replacing the
+// builtin export and calling syncBuiltinESMExports() makes that binding see the stub.
+async function withFailingLockUnlink(code, run) {
+  const realUnlink = fsPromises.unlink;
+  fsPromises.unlink = async (target, ...rest) => {
+    if (String(target).endsWith(".lock")) {
+      const error = new Error(`${code}: stubbed unlink failure, unlink '${target}'`);
+      error.code = code;
+      throw error;
+    }
+    return realUnlink(target, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    return await run();
+  } finally {
+    fsPromises.unlink = realUnlink;
+    syncBuiltinESMExports();
+  }
+}
+
+test("a lock-cleanup failure after a failed update keeps the original error and only warns", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-lock-unlink-test-"));
+  const warn = t.mock.method(console, "warn", () => {});
+  try {
+    const indexPath = path.join(temporary, "pages.json");
+    const original = new Error("update failed");
+    await withFailingLockUnlink("EPERM", () =>
+      assert.rejects(
+        updatePagesIndex(() => {
+          throw original;
+        }, { indexPath }),
+        (error) => error === original,
+      ));
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(String(warn.mock.calls[0].arguments[0]), /could not remove pages index lock after a failed update \(EPERM\)/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a lock-cleanup failure after a successful write says the index was written", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-lock-unlink-test-"));
+  const warn = t.mock.method(console, "warn", () => {});
+  try {
+    const indexPath = path.join(temporary, "pages.json");
+    await withFailingLockUnlink("EBUSY", () =>
+      assert.rejects(
+        updatePagesIndex((current) => [...current, { slug: "kept", title: "Kept" }], { indexPath }),
+        (error) => {
+          assert.match(error.message, /pages index was written, but its lock file could not be removed \(EBUSY\)/);
+          assert.equal(error.cause?.code, "EBUSY");
+          return true;
+        },
+      ));
+    const indexed = JSON.parse(await readFile(indexPath, "utf8"));
+    assert.deepEqual(indexed.map((entry) => entry.slug), ["kept"]);
+    assert.equal(warn.mock.callCount(), 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a lock that is already gone (ENOENT) is not an error", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-lock-unlink-test-"));
+  try {
+    const indexPath = path.join(temporary, "pages.json");
+    const result = await withFailingLockUnlink("ENOENT", () =>
+      updatePagesIndex((current) => [...current, { slug: "fine", title: "Fine" }], { indexPath }));
+    assert.deepEqual(result.map((entry) => entry.slug), ["fine"]);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
