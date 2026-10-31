@@ -112,14 +112,24 @@ function slugify(input, fallback = "page") {
   return slug || fallback;
 }
 
+const NAMED_ENTITIES = { ldquo: "\u201C", rdquo: "\u201D", lsquo: "\u2018", rsquo: "\u2019", hellip: "\u2026", mdash: "\u2014", ndash: "\u2013", copy: "\u00A9" };
+
+// Decode &#NNN; / &#xHHH; references; an out-of-range code point is left as-is.
+function decodeNumericEntity(match, hex, dec) {
+  const codePoint = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(dec, 10);
+  if (!Number.isFinite(codePoint) || codePoint <= 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return match;
+  return String.fromCodePoint(codePoint);
+}
+
 function decodeBasicEntities(text) {
   return String(text || "")
     .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'");
+    .replace(/&(ldquo|rdquo|lsquo|rsquo|hellip|mdash|ndash|copy);/g, (match, name) => NAMED_ENTITIES[name] ?? match)
+    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, decodeNumericEntity)
+    .replace(/&amp;/gi, "&");
 }
 
 function extractTitle(html, fallback) {

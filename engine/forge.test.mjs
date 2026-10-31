@@ -353,3 +353,8 @@ test("an image path written with ~ is classified as an image and resolved under 
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("page titles decode numeric character references", () => {
+  assert.equal(__test__.extractTitle("<title>Tony&#8217;s &#x4E2D;&#x6587;</title>", "f"), "Tony’s 中文");
+  assert.equal(__test__.extractTitle("<title>&#99999999; stays</title>", "f"), "&#99999999; stays");
+});

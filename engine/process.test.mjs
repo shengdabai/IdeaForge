@@ -213,3 +213,12 @@ test("an empty vision description is treated as a failure instead of empty page 
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("htmlToText decodes numeric entities and keeps <br> line breaks", () => {
+  const { title, rawContent } = ingestInternals.htmlToText(
+    "<html><head><title>Tony&#8217;s &#x4E2D;&#x6587; &ldquo;q&rdquo;</title></head><body><p>line one<br>line two<br />line three</p><p>&#39;a&#39; &amp; &#x27;b&#x27; &#99999999;</p></body></html>",
+  );
+  assert.equal(title, "Tony’s 中文 “q”");
+  assert.match(rawContent, /line one\nline two\nline three/u);
+  assert.match(rawContent, /'a' & 'b' &#99999999;/u);
+});
