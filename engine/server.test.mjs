@@ -101,3 +101,14 @@ test("the CLI entry point runs through a symlink and can be imported without a s
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("the dashboard labels its controls, announces status, and blocks double submission", async () => {
+  const dashboard = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(dashboard, /<label for="inp" class="sr-only">/u);
+  assert.match(dashboard, /<label for="engine" class="sr-only">/u);
+  assert.match(dashboard, /id="status" role="status" aria-live="polite"/u);
+  assert.match(dashboard, /class="chev" aria-hidden="true"/u);
+  assert.match(dashboard, /goEl\.disabled=true;/u);
+  assert.match(dashboard, /finally\{\s*goEl\.disabled=false;/u);
+  assert.match(dashboard, /focus-visible\{outline:/u);
+});
