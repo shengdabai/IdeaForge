@@ -186,3 +186,7 @@ test("archive records with the same timestamp and title never overwrite each oth
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test("a Firecrawl key that curl's config parser would unescape is refused", () => {
+  assert.throws(() => firecrawlCurlInvocation("https://example.com", "fc-ba\\ckslash"), /cannot be passed safely/u);
+});

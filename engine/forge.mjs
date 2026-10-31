@@ -79,7 +79,7 @@ export function parseArgs(argv) {
     else if (arg === "--self-test") parsed.selfTest = true;
     else if (arg === "--copy") parsed.importCopy = true;
     else if (arg === "--link") parsed.importCopy = false;
-    else if (arg.startsWith("--engine=")) parsed.engine = arg.slice("--engine=".length);
+    else if (arg.startsWith("--engine=")) parsed.engine = arg.slice("--engine=".length).trim().toLowerCase();
     else if (arg.startsWith("--port=")) parsed.port = Number(arg.slice("--port=".length));
     else if (arg.startsWith("--category=")) parsed.importCategory = arg.slice("--category=".length).trim();
     else if (arg.startsWith("--exclude=")) parsed.importExclude = arg.slice("--exclude=".length).trim();
@@ -825,6 +825,9 @@ function parseGeneratePayload(body) {
     throw new HttpError(400, "Request body must be valid JSON.");
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new HttpError(400, "Request body must be a JSON object.");
+  if (payload.input !== undefined && payload.input !== null && typeof payload.input !== "string") {
+    throw new HttpError(400, "Field input must be a string.");
+  }
   const input = String(payload.input ?? "").trim();
   if (!input) throw new HttpError(400, "Missing required field: input");
   const engine = String(payload.engine || "codex").trim().toLowerCase();

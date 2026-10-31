@@ -98,9 +98,11 @@ function isWechatUrl(url) {
 }
 
 // The API key travels in a curl config read from stdin (`-K -`), so it never
-// appears in the process table (`ps`) or in a crash report's argv.
+// appears in the process table (`ps`) or in a crash report's argv. Inside a
+// quoted config value curl unescapes backslash sequences and a quote or line
+// break ends the value, so a key containing those cannot be delivered intact.
 export function firecrawlCurlInvocation(url, key, { endpoint = FIRECRAWL_SCRAPE_URL } = {}) {
-  if (/[\r\n"]/u.test(String(key))) throw new Error("Firecrawl API key contains characters that cannot be passed safely.");
+  if (/[\r\n"\\]/u.test(String(key))) throw new Error("Firecrawl API key contains characters that cannot be passed safely.");
   const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
   return {
     command: "curl",

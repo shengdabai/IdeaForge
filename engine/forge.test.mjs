@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { __test__, serve, updatePagesIndex } from "./forge.mjs";
+import { __test__, classifyInput, parseArgs, serve, updatePagesIndex } from "./forge.mjs";
 import { injectProvenance } from "./forge.mjs";
 import { validateLocalProfile } from "./generate.mjs";
 
@@ -327,4 +327,10 @@ test("the CLI entry point keeps its executable bit and runs directly", { skip: p
   assert.ok((await stat(entry)).mode & 0o100, "engine/forge.mjs must be executable (git mode 100755)");
   const { stdout } = await promisify(execFile)(entry, ["--self-test"], { timeout: 15_000 });
   assert.match(stdout, /forge self-test passed/);
+});
+
+test("CLI engine names are normalised like the dashboard accepts them", () => {
+  assert.equal(parseArgs(["--engine=Codex", "x"]).engine, "codex");
+  assert.equal(parseArgs(["--engine= OLLAMA ", "x"]).engine, "ollama");
+  assert.throws(() => parseArgs(["--engine=gpt-4", "x"]), /Invalid --engine value/u);
 });

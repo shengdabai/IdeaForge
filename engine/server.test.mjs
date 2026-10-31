@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import http from "node:http";
 import test from "node:test";
-import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -111,4 +111,11 @@ test("the dashboard labels its controls, announces status, and blocks double sub
   assert.match(dashboard, /goEl\.disabled=true;/u);
   assert.match(dashboard, /finally\{\s*goEl\.disabled=false;/u);
   assert.match(dashboard, /focus-visible\{outline:/u);
+});
+
+test("generate payload input must be a string", () => {
+  const { parseGeneratePayload } = forgeInternals;
+  for (const body of ['{"input":{"a":1}}', '{"input":123}', '{"input":["x"]}', '{"input":true}']) {
+    assert.throws(() => parseGeneratePayload(body), (error) => error.statusCode === 400 && /input must be a string/u.test(error.message), body);
+  }
 });
