@@ -767,7 +767,8 @@ function contentType(filePath) {
   if (ext === ".json") return "application/json; charset=utf-8";
   if (ext === ".css") return "text/css; charset=utf-8";
   if (ext === ".js" || ext === ".mjs") return "text/javascript; charset=utf-8";
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(ext)) return `image/${ext.slice(1).replace("jpg", "jpeg")}`;
+  if (ext === ".svg") return "image/svg+xml";
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) return `image/${ext.slice(1).replace("jpg", "jpeg")}`;
   return "application/octet-stream";
 }
 

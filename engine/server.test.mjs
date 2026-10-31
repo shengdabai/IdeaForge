@@ -119,3 +119,39 @@ test("generate payload input must be a string", () => {
     assert.throws(() => parseGeneratePayload(body), (error) => error.statusCode === 400 && /input must be a string/u.test(error.message), body);
   }
 });
+
+test("static pages are served with correct image content types", async () => {
+  const pagesDir = new URL("../pages/", import.meta.url);
+  const stamp = `${process.pid}-${Date.now()}`;
+  const svgPath = new URL(`../pages/mime-test-${stamp}.svg`, import.meta.url);
+  const jpgPath = new URL(`../pages/mime-test-${stamp}.jpg`, import.meta.url);
+  await mkdir(pagesDir, { recursive: true });
+  await writeFile(svgPath, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  await writeFile(jpgPath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const server = await serve({ port: 0, token: "mime-token" });
+  const { port } = server.address();
+  try {
+    const svg = await fetch(`http://127.0.0.1:${port}/pages/mime-test-${stamp}.svg`);
+    assert.equal(svg.status, 200);
+    assert.equal(svg.headers.get("content-type"), "image/svg+xml");
+    const jpg = await fetch(`http://127.0.0.1:${port}/pages/mime-test-${stamp}.jpg`);
+    assert.equal(jpg.headers.get("content-type"), "image/jpeg");
+  } finally {
+    await closeServer(server);
+    await rm(svgPath, { force: true });
+    await rm(jpgPath, { force: true });
+  }
+});
+
+test("dashboard card links percent-encode path segments so % and # in file names stay reachable", async () => {
+  const dashboard = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  const source = dashboard.match(/function hrefFor\(htmlPath\)\{[\s\S]*?\n\}/u)?.[0];
+  assert.ok(source, "hrefFor must exist in index.html");
+  const hrefFor = new Function(`${source}; return hrefFor;`)();
+  assert.equal(hrefFor("pages/分类/100%完成#1.html"), "pages/%E5%88%86%E7%B1%BB/100%25%E5%AE%8C%E6%88%90%231.html");
+  assert.equal(decodeURIComponent(hrefFor("pages/分类/100%完成#1.html")), "pages/分类/100%完成#1.html");
+  assert.equal(hrefFor("templates/golden.html"), "templates/golden.html");
+  assert.equal(hrefFor("/abs/a b.html"), "file:///abs/a%20b.html");
+  assert.equal(hrefFor("https://example.com/x?y=1"), "https://example.com/x?y=1");
+  assert.equal(hrefFor(""), "#");
+});

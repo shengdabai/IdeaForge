@@ -12,7 +12,8 @@ const INPUTS_DIR = path.join(ROOT, "inputs");
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"]);
 
 export async function resolveImagePath(input) {
-  const value = String(input || "").trim();
+  // The dashboard has no shell to expand "~/Pictures/x.png"; expand it here.
+  const value = expandHomePath(String(input || "").trim());
   // Preserve project-relative lookup before caller-relative lookup in both stages.
   for (const candidate of new Set([path.resolve(ROOT, value), path.resolve(value)])) {
     if (!IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase())) continue;
@@ -39,6 +40,15 @@ function safePart(input, fallback = "input") {
     bounded += character;
   }
   return bounded || fallback;
+}
+
+// Expand a leading "~" or "~/" to the home directory. Shells do this for CLI
+// arguments; the dashboard and programmatic callers pass the raw string.
+export function expandHomePath(input) {
+  const value = String(input || "");
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
+  return value;
 }
 
 function timestampSlug(date = new Date()) {
@@ -222,7 +232,12 @@ async function describeImageWithOllama(imagePath) {
     { input: payload, timeoutMs: 120_000 },
   );
   const parsed = JSON.parse(result.stdout);
-  return parsed.response || "";
+  const description = String(parsed.response || "").trim();
+  // An empty description would be archived and then fail much later in
+  // buildPrompt with "empty ingested content"; fail here so ingestImage can
+  // fall back to the path-only note instead.
+  if (!description) throw new Error(`ollama vision model "${model}" returned an empty description.`);
+  return description;
 }
 
 async function ingestImage(input) {

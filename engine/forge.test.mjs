@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { __test__, classifyInput, parseArgs, serve, updatePagesIndex } from "./forge.mjs";
+import { expandHomePath } from "./ingest.mjs";
 import { injectProvenance } from "./forge.mjs";
 import { validateLocalProfile } from "./generate.mjs";
 
@@ -333,4 +334,22 @@ test("CLI engine names are normalised like the dashboard accepts them", () => {
   assert.equal(parseArgs(["--engine=Codex", "x"]).engine, "codex");
   assert.equal(parseArgs(["--engine= OLLAMA ", "x"]).engine, "ollama");
   assert.throws(() => parseArgs(["--engine=gpt-4", "x"]), /Invalid --engine value/u);
+});
+
+test("an image path written with ~ is classified as an image and resolved under the home directory", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-home-test-"));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = temporary;
+    await writeFile(path.join(temporary, "shot.png"), Buffer.alloc(16, 1));
+    assert.equal(await classifyInput("~/shot.png"), "image");
+    assert.equal(await classifyInput("~/missing.png"), "text");
+    assert.equal(expandHomePath("~/shot.png"), path.join(temporary, "shot.png"));
+    assert.equal(expandHomePath("~"), temporary);
+    assert.equal(expandHomePath("~other/shot.png"), "~other/shot.png");
+    assert.equal(expandHomePath("/abs/shot.png"), "/abs/shot.png");
+  } finally {
+    process.env.HOME = previousHome;
+    await rm(temporary, { recursive: true, force: true });
+  }
 });

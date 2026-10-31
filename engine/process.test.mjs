@@ -190,3 +190,26 @@ test("archive records with the same timestamp and title never overwrite each oth
 test("a Firecrawl key that curl's config parser would unescape is refused", () => {
   assert.throws(() => firecrawlCurlInvocation("https://example.com", "fc-ba\\ckslash"), /cannot be passed safely/u);
 });
+
+test("an empty vision description is treated as a failure instead of empty page content", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-vision-empty-test-"));
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ response: "   " }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const imagePath = path.join(temporary, "photo.png");
+    await writeFile(imagePath, Buffer.alloc(64, 3));
+    await withEnv(
+      { OLLAMA_HOST: `127.0.0.1:${server.address().port}`, IDEAFORGE_VISION_MODEL: "test-vision" },
+      () => assert.rejects(ingestInternals.describeImageWithOllama(imagePath), /test-vision.*empty/u),
+    );
+  } finally {
+    await closeServer(server);
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

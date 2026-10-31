@@ -157,8 +157,11 @@ function hrefFor(htmlPath){
   const value=String(htmlPath||'#');
   if(value==='#')return value;
   if(value.startsWith('file://')||/^[a-z]+:\/\//i.test(value))return value;
-  if(value.startsWith('/'))return 'file://'+value.split('/').map(encodeURIComponent).join('/');
-  return value.split('/').map(encodeURIComponent).join('/');
+  // Encode each segment: imported file names may contain % or #, which would
+  // otherwise be read as an escape sequence or a fragment by the browser.
+  const encoded=value.split('/').map(encodeURIComponent).join('/');
+  if(value.startsWith('/'))return 'file://'+encoded;
+  return encoded;
 }
 function typeName(type){
   return ({url:'网页',text:'想法',image:'图片',html:'HTML'})[type]||type||'页面';
