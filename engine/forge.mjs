@@ -3,7 +3,7 @@ import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { constants } from "node:fs";
-import { access, copyFile, lstat, mkdir, open, opendir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, opendir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ingest, resolveImagePath } from "./ingest.mjs";
@@ -41,15 +41,6 @@ function usage() {
     "  node engine/forge.mjs serve [--port=8765]",
     "  node engine/forge.mjs --self-test",
   ].join("\n");
-}
-
-async function fileExists(filePath) {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export async function classifyInput(input) {
@@ -136,19 +127,6 @@ function extractTags(html) {
     if (text) tags.add(text);
   }
   return [...tags].slice(0, 8);
-}
-
-async function uniquePagePath(baseSlug) {
-  await mkdir(PAGES_DIR, { recursive: true });
-  let slug = baseSlug;
-  let filePath = path.join(PAGES_DIR, `${slug}.html`);
-  let i = 2;
-  while (await fileExists(filePath)) {
-    slug = `${baseSlug}-${i}`;
-    filePath = path.join(PAGES_DIR, `${slug}.html`);
-    i += 1;
-  }
-  return { slug, filePath };
 }
 
 async function writeNewPage(baseSlug, html, { pagesDir = PAGES_DIR } = {}) {
@@ -358,19 +336,31 @@ async function cleanOrphanTempFiles(indexPath) {
 export async function updatePagesIndex(update, { indexPath = PAGES_JSON } = {}) {
   await mkdir(path.dirname(indexPath), { recursive: true });
   const lock = await acquireIndexLock(indexPath);
+  let written = false;
   try {
     await cleanOrphanTempFiles(indexPath);
     const current = await readPagesJson(indexPath);
     const next = await update(current);
     if (!Array.isArray(next)) throw new Error("pages index update must return an array.");
     await writePagesJson(next, indexPath);
+    written = true;
     return next;
   } finally {
     await lock.handle.close();
     try {
       await unlink(lock.lockPath);
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (error.code !== "ENOENT") {
+        // A lock left behind blocks later writers, so never drop this silently. But a throw
+        // here would replace the body's own error, so only throw when the body succeeded.
+        if (written) {
+          throw new Error(
+            `pages index was written, but its lock file could not be removed (${error.code || error.message}): ${lock.lockPath}`,
+            { cause: error },
+          );
+        }
+        console.warn(`[IdeaForge] warning: could not remove pages index lock after a failed update (${error.code || error.message}): ${lock.lockPath}`);
+      }
     }
   }
 }
@@ -518,10 +508,6 @@ function inferCategory(filePath, importRoot, rootName, forcedCategory) {
   const parts = relative.split(path.sep).filter(Boolean);
   if (parts.length > 1) return parts[0];
   return rootName;
-}
-
-function stripHtml(text) {
-  return decodeBasicEntities(String(text || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 
 function safeFilePart(input, fallback = "page") {
