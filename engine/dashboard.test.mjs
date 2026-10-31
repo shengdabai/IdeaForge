@@ -92,3 +92,16 @@ test("dashboard link encoding preserves explicit URLs and absolute local paths",
   context.inputPath = "";
   assert.equal(vm.runInContext("hrefFor(inputPath)", context), "#");
 });
+
+test("a dashboard opened without its token says where the launcher shows the URL", async () => {
+  const context = await dashboardContext();
+  const element = (id) => vm.runInContext(`document.getElementById(${JSON.stringify(id)})`, context);
+  element("inp").value = "a synthetic idea";
+  element("engine").value = "codex";
+  await element("go").onclick();
+  const message = element("status").innerHTML;
+  assert.match(message, /缺少本次服务的访问令牌/);
+  assert.match(message, /forge serve/);
+  assert.match(message, /start-dashboard\.command/);
+  assert.match(message, /终端/);
+});

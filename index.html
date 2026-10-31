@@ -243,7 +243,7 @@ document.getElementById('go').onclick=async()=>{
   const v=document.getElementById('inp').value.trim();
   const engine=document.getElementById('engine').value;
   if(!v){statusEl.textContent='先输入点东西。';return;}
-  if(!dashboardToken){statusEl.innerHTML='缺少本次服务的访问令牌。请从 <code>forge serve</code> 输出的本地链接重新打开 Dashboard。';return;}
+  if(!dashboardToken){statusEl.innerHTML='缺少本次服务的访问令牌。请从 <code>forge serve</code> 输出的本地链接重新打开 Dashboard（双击 <code>start-dashboard.command</code> 启动时，该链接显示在启动器的终端窗口里）。';return;}
   statusEl.textContent='炼制中…（需 forge serve 在运行）';
   try{
     const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json','X-Forge-Token':dashboardToken},

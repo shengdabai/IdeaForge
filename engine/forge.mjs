@@ -21,6 +21,13 @@ const INDEX_LOCK_TIMEOUT_MS = 5_000;
 // is older than this. A live writer fills the metadata microseconds after the
 // exclusive create, so anything this old without valid metadata is debris.
 const UNREADABLE_LOCK_MAX_AGE_MS = 60_000;
+// Written into every index lock: a lock with this process's PID but another nonce was
+// left by an earlier process that had the same PID (e.g. a restarted container).
+const LOCK_NONCE = randomBytes(12).toString("hex");
+// Index locks this process created but could not remove (e.g. EBUSY), by lock path.
+// Nobody holds them any more, so the next update here takes them over instead of
+// waiting on itself until the timeout.
+const leftoverIndexLocks = new Map();
 const SENSITIVE_STATIC_NAMES = new Set(["token", "forge-token", "forge.token", "dashboard-token", "dashboard.token"]);
 const EXTENSION_FRAGMENT_NAMES = new Set([
   "popup.html",
@@ -58,7 +65,7 @@ export function parseArgs(argv) {
     input: "",
     importDir: "",
     importCategory: "",
-    importCopy: false,
+    importCopy: true,
     importExclude: "",
     port: DEFAULT_PORT,
     selfTest: false,
@@ -129,7 +136,10 @@ function extractTags(html) {
   return [...tags].slice(0, 8);
 }
 
-async function writeNewPage(baseSlug, html, { pagesDir = PAGES_DIR } = {}) {
+async function writeNewPage(requestedSlug, html, { pagesDir = PAGES_DIR } = {}) {
+  // The static server refuses reserved names (secrets.html, credentials.html, id_rsa*),
+  // so never give a generated page one. A prefix also covers the id_rsa* prefix rule.
+  const baseSlug = isSensitiveStaticPath(`${requestedSlug}.html`) ? `page-${requestedSlug}` : requestedSlug;
   await mkdir(pagesDir, { recursive: true });
   for (let i = 1; i < 10_000; i += 1) {
     const slug = i === 1 ? baseSlug : `${baseSlug}-${i}`;
@@ -184,16 +194,28 @@ async function acquireIndexLock(indexPath) {
   const deadline = Date.now() + INDEX_LOCK_TIMEOUT_MS;
   let lastHolder = "unknown";
   while (true) {
+    const leftover = leftoverIndexLocks.get(lockPath);
+    if (leftover) {
+      // Claimed synchronously, so only one caller in this process takes it over.
+      leftoverIndexLocks.delete(lockPath);
+      if (await isOwnLeftoverLock(lockPath, leftover)) {
+        console.warn(`[IdeaForge] taking over this process's leftover pages index lock: ${lockPath}`);
+        return { lockPath, handle: null, identity: leftover };
+      }
+    }
     try {
       const handle = await open(lockPath, "wx", 0o600);
+      let identity;
       try {
-        await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, nonce: LOCK_NONCE, createdAt: new Date().toISOString() })}\n`, "utf8");
+        const info = await handle.stat();
+        identity = { dev: info.dev, ino: info.ino };
       } catch (error) {
         await handle.close();
         await unlink(lockPath).catch(() => {});
         throw error;
       }
-      return { lockPath, handle };
+      return { lockPath, handle, identity };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       const verdict = await inspectIndexLock(lockPath);
@@ -208,6 +230,17 @@ async function acquireIndexLock(indexPath) {
       }
       await wait(25 + Math.floor(Math.random() * 25));
     }
+  }
+}
+
+async function isOwnLeftoverLock(lockPath, identity) {
+  try {
+    const current = await lstat(lockPath);
+    if (current.dev !== identity.dev || current.ino !== identity.ino) return false;
+    const metadata = JSON.parse(await readFile(lockPath, "utf8"));
+    return metadata?.pid === process.pid && metadata?.nonce === LOCK_NONCE;
+  } catch {
+    return false;
   }
 }
 
@@ -271,6 +304,9 @@ async function inspectIndexLock(lockPath) {
       return { abandoned: true, snapshot, reason: `unreadable lock older than ${Math.round(UNREADABLE_LOCK_MAX_AGE_MS / 1000)}s` };
     }
     return { abandoned: false, snapshot, reason: `unreadable lock, age ${Math.round(ageMs / 1000)}s` };
+  }
+  if (pid === process.pid && metadata.nonce !== LOCK_NONCE) {
+    return { abandoned: true, snapshot, reason: `pid ${pid} is this process, but an earlier process with that pid wrote the lock` };
   }
   try {
     process.kill(pid, 0);
@@ -346,20 +382,19 @@ export async function updatePagesIndex(update, { indexPath = PAGES_JSON } = {}) 
     written = true;
     return next;
   } finally {
-    await lock.handle.close();
+    if (lock.handle) await lock.handle.close();
     try {
       await unlink(lock.lockPath);
     } catch (error) {
       if (error.code !== "ENOENT") {
-        // A lock left behind blocks later writers, so never drop this silently. But a throw
-        // here would replace the body's own error, so only throw when the body succeeded.
-        if (written) {
-          throw new Error(
-            `pages index was written, but its lock file could not be removed (${error.code || error.message}): ${lock.lockPath}`,
-            { cause: error },
-          );
-        }
-        console.warn(`[IdeaForge] warning: could not remove pages index lock after a failed update (${error.code || error.message}): ${lock.lockPath}`);
+        // A lock left behind blocks later writers, so never drop this silently. Do not throw:
+        // that would replace the body's own result or error (a 500 for a page that is already
+        // indexed). Remember the lock instead, so the next update in this process takes it over.
+        leftoverIndexLocks.set(lock.lockPath, lock.identity);
+        const reason = error.code || error.message;
+        console.warn(written
+          ? `[IdeaForge] warning: pages index was written, but its lock file could not be removed (${reason}); this process takes it over on its next update: ${lock.lockPath}`
+          : `[IdeaForge] warning: could not remove pages index lock after a failed update (${reason}); this process takes it over on its next update: ${lock.lockPath}`);
       }
     }
   }
@@ -377,22 +412,32 @@ export async function appendPageIndex(entry) {
 
 // Append-only: existing entries (and any extra fields on them, e.g. stale or remap
 // markers) are never replaced or collapsed. A new entry whose identity already
-// exists in the index read under the lock is skipped. Returns the entries added.
+// exists in the index read under the lock is skipped, as is a copied page whose
+// source is already registered in the same category. Returns the entries added
+// and the skipped copies of an already registered source.
 async function appendPageIndexes(entries) {
   const added = [];
-  if (!entries.length) return added;
+  const duplicateCopies = [];
+  if (!entries.length) return { added, duplicateCopies };
   await updatePagesIndex((list) => {
     const entryKey = (item) => item.htmlPath ? `path:${item.htmlPath}` : `slug:${item.slug}`;
     const present = new Set(list.map(entryKey));
+    const sources = new Set(list.map(importedSourceIdentity).filter(Boolean));
     for (const entry of entries) {
       const key = entryKey(entry);
       if (present.has(key)) continue;
+      const source = entry.htmlPath?.startsWith("pages/") ? importedSourceIdentity(entry) : null;
+      if (source && sources.has(source)) {
+        duplicateCopies.push(entry);
+        continue;
+      }
       present.add(key);
+      if (source) sources.add(source);
       added.push(entry);
     }
     return [...list, ...added];
   });
-  return added;
+  return { added, duplicateCopies };
 }
 
 function sourceFromRecord(record) {
@@ -582,9 +627,20 @@ function sanitizeImportTags(html, category) {
   return [...new Set([category, ...cleaned])].filter(Boolean).slice(0, 5);
 }
 
+// Which original file an imported entry stands for, per category: copy entries keep
+// the original path in `source`, --link entries register that path as `htmlPath`.
+function importedSourceIdentity(item) {
+  if (item?.type !== "html" || typeof item.htmlPath !== "string") return null;
+  if (item.htmlPath.startsWith("pages/")) {
+    return typeof item.source === "string" ? JSON.stringify([item.source, item.category]) : null;
+  }
+  return path.isAbsolute(item.htmlPath) ? JSON.stringify([item.htmlPath, item.category]) : null;
+}
+
 // Default (copy) mode copies the HTML into pages/<category>/ so the archive is
 // self-contained; --link registers the original absolute path instead.
 export async function importPages(dir, { category = "", copy = true, exclude = "" } = {}) {
+  if (!copy) console.warn("[import] --link indexes local paths only; HTTP dashboard browsers cannot open file:// links. Omit --link to copy portable HTML.");
   const importRoot = path.resolve(dir || "");
   const info = await stat(importRoot);
   const isSingleFile = info.isFile() && path.extname(importRoot).toLowerCase() === ".html";
@@ -598,10 +654,9 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
   const existingPaths = new Set(existing.map((item) => item.htmlPath).filter(Boolean));
   const usedPaths = new Set(existingPaths);
   const sourceIdentity = (source, category) => JSON.stringify([source, category]);
-  const copiedSources = new Set(existing
-    .filter((item) => item.type === "html" && typeof item.source === "string" && item.htmlPath?.startsWith("pages/"))
-    .map((item) => sourceIdentity(item.source, item.category)));
+  const copiedSources = new Set(existing.map(importedSourceIdentity).filter(Boolean));
   const imported = [];
+  const copiedFiles = new Map();
   const categoryCounts = new Map();
   const skipped = {
     duplicate: 0,
@@ -652,6 +707,7 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
         }
         const target = await copyToAvailableTarget(filePath, primary, usedPaths);
         htmlPath = target.relative;
+        copiedFiles.set(htmlPath, target.absolute);
         copiedSources.add(identity);
       } else {
         htmlPath = path.resolve(filePath);
@@ -672,16 +728,24 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
         createdAt: new Date().toISOString().slice(0, 10),
         htmlPath,
       });
-      categoryCounts.set(pageCategory, (categoryCounts.get(pageCategory) || 0) + 1);
     } catch (error) {
       skipped.error += 1;
       console.error(`[import] failed ${filePath}: ${error.message}`);
     }
   }
 
-  const added = await appendPageIndexes(imported);
-  // Entries another writer registered between our scan and taking the lock.
+  const { added, duplicateCopies } = await appendPageIndexes(imported);
+  // Entries another writer registered between our scan and taking the lock; a copy
+  // of a source that a concurrent import registered first is removed again.
   skipped.duplicate += imported.length - added.length;
+  for (const entry of duplicateCopies) {
+    await unlink(copiedFiles.get(entry.htmlPath)).catch((error) => {
+      console.error(`[import] could not remove duplicate copy ${entry.htmlPath}: ${error.message}`);
+    });
+  }
+  for (const entry of added) {
+    categoryCounts.set(entry.category, (categoryCounts.get(entry.category) || 0) + 1);
+  }
 
   const skippedTotal = Object.values(skipped).reduce((a, b) => a + b, 0);
   console.log(`[import] done: imported ${added.length}, skipped ${skippedTotal}, scanned ${scanned}`);
@@ -927,8 +991,9 @@ async function selfTest() {
   assert(parseArgs(["--engine=ollama", "--ingest-only", "hello"]).engine === "ollama", "engine parse");
   assert(parseArgs(["serve", "--port=9999"]).command === "serve", "serve command parse");
   assert(parseArgs(["import", "./x", "--category=资料", "--copy", "--exclude=popup.html"]).command === "import", "import command parse");
-  assert(parseArgs(["import", "./x"]).importCopy === false, "import defaults to link (register original path)");
-  assert(parseArgs(["import", "./x", "--copy"]).importCopy === true, "--copy opts into copying");
+  assert(parseArgs(["import", "./x"]).importCopy === true, "import defaults to copy (into pages/)");
+  assert(parseArgs(["import", "./x", "--copy"]).importCopy === true, "--copy keeps copying");
+  assert(parseArgs(["import", "./x", "--link"]).importCopy === false, "--link opts out (register original path)");
   assert(parseArgs(["serve"]).port === 8765, "default port 8765");
   assert(parseArgs(["a", "b"]).input === "a b", "input join parse");
   assert((await classifyInput("https://example.com")) === "url", "url classify");

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import test from "node:test";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 async function withImportFixture(run) {
   const root = await mkdtemp(path.join(os.tmpdir(), "ideaforge-import-fixture-"));
@@ -20,7 +24,10 @@ async function withImportFixture(run) {
       await writeFile(file, html);
       return { file, html };
     };
-    await run({ root, importPages, serve, source });
+    // forge.mjs only runs main() when argv[1] is its real path (tmpdir may be a symlink).
+    const cliEntry = path.join(await realpath(root), "engine", "forge.mjs");
+    const cli = (...args) => execFileAsync(process.execPath, [cliEntry, ...args], { cwd: root });
+    await run({ root, importPages, serve, source, cli });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -151,5 +158,52 @@ test("dot-only import categories cannot escape pages or create inaccessible dotf
       assert.match(await readFile(path.join(root, entry.htmlPath), "utf8"), /Synthetic content/);
     }
     assert.ok((await readdir(root)).every((name) => !name.endsWith(".html")));
+  });
+});
+
+test("forge import on the command line copies into pages/ by default; --link warns and opts out", async () => {
+  await withImportFixture(async ({ root, source, cli }) => {
+    const copied = await source("copied", "Copied by default");
+    const defaultRun = await cli("import", copied.file, "--category=archive");
+    assert.doesNotMatch(defaultRun.stderr, /--link/);
+    let entries = JSON.parse(await readFile(path.join(root, "pages.json"), "utf8"));
+    assert.equal(entries.length, 1);
+    assert.match(entries[0].htmlPath, /^pages\/archive\/[^/]+\.html$/);
+    assert.equal(entries[0].source, copied.file);
+    assert.equal(await readFile(path.join(root, entries[0].htmlPath), "utf8"), copied.html);
+
+    const linked = await source("linked", "Registered in place");
+    const linkRun = await cli("import", linked.file, "--category=archive", "--link");
+    assert.match(linkRun.stderr, /--link .*file:\/\//);
+    entries = JSON.parse(await readFile(path.join(root, "pages.json"), "utf8"));
+    assert.equal(entries.length, 2);
+    assert.equal(entries[1].htmlPath, linked.file);
+  });
+});
+
+test("a copy import skips a source already registered by a --link import", async () => {
+  await withImportFixture(async ({ root, importPages, source }) => {
+    const original = await source("linked", "Linked first");
+    assert.equal((await importPages(original.file, { category: "archive", copy: false })).imported, 1);
+    const repeat = await importPages(original.file, { category: "archive" });
+    assert.equal(repeat.imported, 0);
+    assert.equal(repeat.skipped.duplicate, 1);
+    const entries = JSON.parse(await readFile(path.join(root, "pages.json"), "utf8"));
+    assert.deepEqual(entries.map((entry) => entry.htmlPath), [original.file]);
+    await assert.rejects(readdir(path.join(root, "pages", "archive")), { code: "ENOENT" });
+  });
+});
+
+test("concurrent copy imports of the same source keep one copy and one index entry", async () => {
+  await withImportFixture(async ({ root, importPages, source }) => {
+    const original = await source("one", "Same source");
+    const results = await Promise.all(Array.from({ length: 4 }, () => importPages(original.file, { category: "archive" })));
+    assert.equal(results.reduce((sum, result) => sum + result.imported, 0), 1);
+    assert.equal(results.reduce((sum, result) => sum + result.skipped.duplicate, 0), 3);
+    assert.deepEqual(results.map((result) => result.categoryCounts.archive || 0).sort(), [0, 0, 0, 1]);
+    const entries = JSON.parse(await readFile(path.join(root, "pages.json"), "utf8"));
+    assert.equal(entries.length, 1);
+    assert.deepEqual(await readdir(path.join(root, "pages", "archive")), [path.basename(entries[0].htmlPath)]);
+    assert.equal(await readFile(path.join(root, entries[0].htmlPath), "utf8"), original.html);
   });
 });

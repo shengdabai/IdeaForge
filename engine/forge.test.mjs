@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import http from "node:http";
 import test from "node:test";
-import fsPromises, { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises, { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { __test__, serve, updatePagesIndex } from "./forge.mjs";
 import { injectProvenance } from "./forge.mjs";
 import { validateLocalProfile } from "./generate.mjs";
@@ -85,6 +87,37 @@ test("dashboard reads its session token from the URL fragment and sends the auth
   assert.doesNotMatch(launcher, /open "http:\/\/127\.0\.0\.1:\$PORT\//);
   assert.match(dashboard, /data\.error\|\|'生成失败，请检查本地服务日志。'/);
   assert.match(dashboard, /无法连接本地服务。请在终端运行/);
+});
+
+test("the launcher shows server output and the Dashboard URL in its own terminal", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-launcher-test-"));
+  try {
+    const bin = path.join(temporary, "bin");
+    const opened = path.join(temporary, "opened.txt");
+    await mkdir(path.join(temporary, "engine"));
+    await mkdir(bin);
+    await copyFile(new URL("../start-dashboard.command", import.meta.url), path.join(temporary, "start-dashboard.command"));
+    const url = "http://127.0.0.1:8765/#forge-token=synthetic-launcher-token";
+    // A stand-in server: prints its URL and one log line, then exits shortly after.
+    await writeFile(path.join(temporary, "engine", "forge.mjs"),
+      `console.log(${JSON.stringify(`IdeaForge serving at ${url}`)});\nconsole.error("synthetic server log line");\nsetTimeout(() => {}, 800);\n`);
+    const stub = async (name, body) => {
+      await writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`);
+      await chmod(path.join(bin, name), 0o755);
+    };
+    await stub("lsof", "exit 1");
+    await stub("open", `printf '%s\\n' "$1" >> "${opened}"`);
+    await stub("mktemp", `f="${path.join(temporary, "launcher.log")}"; : > "$f"; printf '%s\\n' "$f"`);
+    const { stdout } = await promisify(execFile)("/bin/bash", [path.join(temporary, "start-dashboard.command")], {
+      env: { ...process.env, PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin` },
+      timeout: 15_000,
+    });
+    assert.match(stdout, /synthetic server log line/);
+    assert.ok(stdout.includes(`Dashboard URL: ${url}`), stdout);
+    assert.equal(await readFile(opened, "utf8"), `${url}\n`);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("first-run profile validation fails before a template can be sent to an engine", () => {
@@ -191,12 +224,33 @@ test("an index lock left by a dead process is recovered", async () => {
   }
 });
 
+test("a lock carrying this process's pid but not its nonce is reclaimed at once", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-own-pid-lock-test-"));
+  try {
+    const indexPath = path.join(temporary, "pages.json");
+    // Same pid, left by an earlier process (e.g. a restarted container): missing or foreign nonce.
+    for (const [i, extra] of [{}, { nonce: "an-earlier-process" }].entries()) {
+      await writeFile(`${indexPath}.lock`, `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), ...extra })}\n`);
+      const started = Date.now();
+      await updatePagesIndex((current) => [...current, { slug: `reclaimed-${i}`, title: "Reclaimed" }], { indexPath });
+      assert.ok(Date.now() - started < 2_000, "must not wait for the lock timeout");
+    }
+    const indexed = JSON.parse(await readFile(indexPath, "utf8"));
+    assert.deepEqual(indexed.map((entry) => entry.slug), ["reclaimed-0", "reclaimed-1"]);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 // forge.mjs imports unlink from node:fs/promises as a named binding. Replacing the
 // builtin export and calling syncBuiltinESMExports() makes that binding see the stub.
-async function withFailingLockUnlink(code, run) {
+async function withFailingLockUnlink(code, run, { times = Infinity } = {}) {
   const realUnlink = fsPromises.unlink;
+  let failures = 0;
   fsPromises.unlink = async (target, ...rest) => {
-    if (String(target).endsWith(".lock")) {
+    if (String(target).endsWith(".lock") && failures < times) {
+      failures += 1;
       const error = new Error(`${code}: stubbed unlink failure, unlink '${target}'`);
       error.code = code;
       throw error;
@@ -232,23 +286,25 @@ test("a lock-cleanup failure after a failed update keeps the original error and 
   }
 });
 
-test("a lock-cleanup failure after a successful write says the index was written", async (t) => {
+test("a lock-cleanup failure after a successful write is not an error and the next update takes the lock over", async (t) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-lock-unlink-test-"));
   const warn = t.mock.method(console, "warn", () => {});
   try {
     const indexPath = path.join(temporary, "pages.json");
-    await withFailingLockUnlink("EBUSY", () =>
-      assert.rejects(
-        updatePagesIndex((current) => [...current, { slug: "kept", title: "Kept" }], { indexPath }),
-        (error) => {
-          assert.match(error.message, /pages index was written, but its lock file could not be removed \(EBUSY\)/);
-          assert.equal(error.cause?.code, "EBUSY");
-          return true;
-        },
-      ));
+    const result = await withFailingLockUnlink("EBUSY", () =>
+      updatePagesIndex((current) => [...current, { slug: "kept", title: "Kept" }], { indexPath }), { times: 1 });
+    assert.deepEqual(result.map((entry) => entry.slug), ["kept"]);
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(String(warn.mock.calls[0].arguments[0]), /pages index was written, but its lock file could not be removed \(EBUSY\)/);
+    await readFile(`${indexPath}.lock`, "utf8"); // still there
+
+    const started = Date.now();
+    await Promise.all(["next-0", "next-1", "next-2"].map((slug) =>
+      updatePagesIndex((current) => [...current, { slug, title: "Next" }], { indexPath })));
+    assert.ok(Date.now() - started < 2_000, "must not wait on its own leftover lock until the timeout");
     const indexed = JSON.parse(await readFile(indexPath, "utf8"));
-    assert.deepEqual(indexed.map((entry) => entry.slug), ["kept"]);
-    assert.equal(warn.mock.callCount(), 0);
+    assert.deepEqual(indexed.map((entry) => entry.slug).sort(), ["kept", "next-0", "next-1", "next-2"]);
+    await assert.rejects(readFile(`${indexPath}.lock`, "utf8"), { code: "ENOENT" });
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -264,4 +320,11 @@ test("a lock that is already gone (ENOENT) is not an error", async () => {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test("the CLI entry point keeps its executable bit and runs directly", { skip: process.platform === "win32" }, async () => {
+  const entry = fileURLToPath(new URL("./forge.mjs", import.meta.url));
+  assert.ok((await stat(entry)).mode & 0o100, "engine/forge.mjs must be executable (git mode 100755)");
+  const { stdout } = await promisify(execFile)(entry, ["--self-test"], { timeout: 15_000 });
+  assert.match(stdout, /forge self-test passed/);
 });
