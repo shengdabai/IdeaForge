@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import http from "node:http";
 import test from "node:test";
-import fsPromises, { chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises, { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -320,4 +320,11 @@ test("a lock that is already gone (ENOENT) is not an error", async () => {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test("the CLI entry point keeps its executable bit and runs directly", { skip: process.platform === "win32" }, async () => {
+  const entry = fileURLToPath(new URL("./forge.mjs", import.meta.url));
+  assert.ok((await stat(entry)).mode & 0o100, "engine/forge.mjs must be executable (git mode 100755)");
+  const { stdout } = await promisify(execFile)(entry, ["--self-test"], { timeout: 15_000 });
+  assert.match(stdout, /forge self-test passed/);
 });
