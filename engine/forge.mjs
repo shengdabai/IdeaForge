@@ -58,7 +58,7 @@ export function parseArgs(argv) {
     input: "",
     importDir: "",
     importCategory: "",
-    importCopy: false,
+    importCopy: true,
     importExclude: "",
     port: DEFAULT_PORT,
     selfTest: false,
@@ -582,9 +582,20 @@ function sanitizeImportTags(html, category) {
   return [...new Set([category, ...cleaned])].filter(Boolean).slice(0, 5);
 }
 
+// Which original file an imported entry stands for, per category: copy entries keep
+// the original path in `source`, --link entries register that path as `htmlPath`.
+function importedSourceIdentity(item) {
+  if (item?.type !== "html" || typeof item.htmlPath !== "string") return null;
+  if (item.htmlPath.startsWith("pages/")) {
+    return typeof item.source === "string" ? JSON.stringify([item.source, item.category]) : null;
+  }
+  return path.isAbsolute(item.htmlPath) ? JSON.stringify([item.htmlPath, item.category]) : null;
+}
+
 // Default (copy) mode copies the HTML into pages/<category>/ so the archive is
 // self-contained; --link registers the original absolute path instead.
 export async function importPages(dir, { category = "", copy = true, exclude = "" } = {}) {
+  if (!copy) console.warn("[import] --link indexes local paths only; HTTP dashboard browsers cannot open file:// links. Omit --link to copy portable HTML.");
   const importRoot = path.resolve(dir || "");
   const info = await stat(importRoot);
   const isSingleFile = info.isFile() && path.extname(importRoot).toLowerCase() === ".html";
@@ -598,9 +609,7 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
   const existingPaths = new Set(existing.map((item) => item.htmlPath).filter(Boolean));
   const usedPaths = new Set(existingPaths);
   const sourceIdentity = (source, category) => JSON.stringify([source, category]);
-  const copiedSources = new Set(existing
-    .filter((item) => item.type === "html" && typeof item.source === "string" && item.htmlPath?.startsWith("pages/"))
-    .map((item) => sourceIdentity(item.source, item.category)));
+  const copiedSources = new Set(existing.map(importedSourceIdentity).filter(Boolean));
   const imported = [];
   const categoryCounts = new Map();
   const skipped = {
@@ -927,8 +936,9 @@ async function selfTest() {
   assert(parseArgs(["--engine=ollama", "--ingest-only", "hello"]).engine === "ollama", "engine parse");
   assert(parseArgs(["serve", "--port=9999"]).command === "serve", "serve command parse");
   assert(parseArgs(["import", "./x", "--category=资料", "--copy", "--exclude=popup.html"]).command === "import", "import command parse");
-  assert(parseArgs(["import", "./x"]).importCopy === false, "import defaults to link (register original path)");
-  assert(parseArgs(["import", "./x", "--copy"]).importCopy === true, "--copy opts into copying");
+  assert(parseArgs(["import", "./x"]).importCopy === true, "import defaults to copy (into pages/)");
+  assert(parseArgs(["import", "./x", "--copy"]).importCopy === true, "--copy keeps copying");
+  assert(parseArgs(["import", "./x", "--link"]).importCopy === false, "--link opts out (register original path)");
   assert(parseArgs(["serve"]).port === 8765, "default port 8765");
   assert(parseArgs(["a", "b"]).input === "a b", "input join parse");
   assert((await classifyInput("https://example.com")) === "url", "url classify");
