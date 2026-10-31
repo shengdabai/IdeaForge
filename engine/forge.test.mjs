@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import http from "node:http";
 import test from "node:test";
-import fsPromises, { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises, { chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { __test__, serve, updatePagesIndex } from "./forge.mjs";
 import { injectProvenance } from "./forge.mjs";
 import { validateLocalProfile } from "./generate.mjs";
@@ -85,6 +87,37 @@ test("dashboard reads its session token from the URL fragment and sends the auth
   assert.doesNotMatch(launcher, /open "http:\/\/127\.0\.0\.1:\$PORT\//);
   assert.match(dashboard, /data\.error\|\|'生成失败，请检查本地服务日志。'/);
   assert.match(dashboard, /无法连接本地服务。请在终端运行/);
+});
+
+test("the launcher shows server output and the Dashboard URL in its own terminal", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ideaforge-launcher-test-"));
+  try {
+    const bin = path.join(temporary, "bin");
+    const opened = path.join(temporary, "opened.txt");
+    await mkdir(path.join(temporary, "engine"));
+    await mkdir(bin);
+    await copyFile(new URL("../start-dashboard.command", import.meta.url), path.join(temporary, "start-dashboard.command"));
+    const url = "http://127.0.0.1:8765/#forge-token=synthetic-launcher-token";
+    // A stand-in server: prints its URL and one log line, then exits shortly after.
+    await writeFile(path.join(temporary, "engine", "forge.mjs"),
+      `console.log(${JSON.stringify(`IdeaForge serving at ${url}`)});\nconsole.error("synthetic server log line");\nsetTimeout(() => {}, 800);\n`);
+    const stub = async (name, body) => {
+      await writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`);
+      await chmod(path.join(bin, name), 0o755);
+    };
+    await stub("lsof", "exit 1");
+    await stub("open", `printf '%s\\n' "$1" >> "${opened}"`);
+    await stub("mktemp", `f="${path.join(temporary, "launcher.log")}"; : > "$f"; printf '%s\\n' "$f"`);
+    const { stdout } = await promisify(execFile)("/bin/bash", [path.join(temporary, "start-dashboard.command")], {
+      env: { ...process.env, PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin` },
+      timeout: 15_000,
+    });
+    assert.match(stdout, /synthetic server log line/);
+    assert.ok(stdout.includes(`Dashboard URL: ${url}`), stdout);
+    assert.equal(await readFile(opened, "utf8"), `${url}\n`);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("first-run profile validation fails before a template can be sent to an engine", () => {

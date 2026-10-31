@@ -12,14 +12,18 @@ fi
 echo "IdeaForge starting…"
 # The server emits a one-time Dashboard URL containing an auth token in its
 # fragment. Wait for that exact URL rather than opening the unauthenticated root.
+# Server output goes to this terminal and, via tee, to a temp file read below.
 LOG_FILE="$(mktemp -t ideaforge-dashboard)" || exit 1
 trap 'rm -f "$LOG_FILE"' EXIT
-node engine/forge.mjs serve --port=$PORT >"$LOG_FILE" 2>&1 &
+node engine/forge.mjs serve --port=$PORT 2>&1 | tee "$LOG_FILE" &
+# PID of tee, which exits when the server closes its output.
 SERVER_PID=$!
 
 for _ in $(seq 1 50); do
   DASHBOARD_URL="$(awk '/^IdeaForge serving at / { sub(/^IdeaForge serving at /, ""); print; exit }' "$LOG_FILE")"
   if [ -n "$DASHBOARD_URL" ]; then
+    echo "Dashboard URL: $DASHBOARD_URL"
+    echo "Reopen this URL if a refreshed Dashboard asks for its token. 刷新后缺令牌时，请重新打开上面这条链接。"
     open "$DASHBOARD_URL"
     break
   fi
@@ -30,7 +34,6 @@ for _ in $(seq 1 50); do
 done
 
 if [ -z "$DASHBOARD_URL" ]; then
-  echo "IdeaForge failed to start:"
-  sed -n '1,80p' "$LOG_FILE"
+  echo "IdeaForge failed to start; see the server output above."
 fi
 wait "$SERVER_PID"
