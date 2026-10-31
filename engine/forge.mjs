@@ -129,7 +129,10 @@ function extractTags(html) {
   return [...tags].slice(0, 8);
 }
 
-async function writeNewPage(baseSlug, html, { pagesDir = PAGES_DIR } = {}) {
+async function writeNewPage(requestedSlug, html, { pagesDir = PAGES_DIR } = {}) {
+  // The static server refuses reserved names (secrets.html, credentials.html, id_rsa*),
+  // so never give a generated page one. A prefix also covers the id_rsa* prefix rule.
+  const baseSlug = isSensitiveStaticPath(`${requestedSlug}.html`) ? `page-${requestedSlug}` : requestedSlug;
   await mkdir(pagesDir, { recursive: true });
   for (let i = 1; i < 10_000; i += 1) {
     const slug = i === 1 ? baseSlug : `${baseSlug}-${i}`;
