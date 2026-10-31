@@ -21,6 +21,13 @@ const INDEX_LOCK_TIMEOUT_MS = 5_000;
 // is older than this. A live writer fills the metadata microseconds after the
 // exclusive create, so anything this old without valid metadata is debris.
 const UNREADABLE_LOCK_MAX_AGE_MS = 60_000;
+// Written into every index lock: a lock with this process's PID but another nonce was
+// left by an earlier process that had the same PID (e.g. a restarted container).
+const LOCK_NONCE = randomBytes(12).toString("hex");
+// Index locks this process created but could not remove (e.g. EBUSY), by lock path.
+// Nobody holds them any more, so the next update here takes them over instead of
+// waiting on itself until the timeout.
+const leftoverIndexLocks = new Map();
 const SENSITIVE_STATIC_NAMES = new Set(["token", "forge-token", "forge.token", "dashboard-token", "dashboard.token"]);
 const EXTENSION_FRAGMENT_NAMES = new Set([
   "popup.html",
@@ -187,16 +194,28 @@ async function acquireIndexLock(indexPath) {
   const deadline = Date.now() + INDEX_LOCK_TIMEOUT_MS;
   let lastHolder = "unknown";
   while (true) {
+    const leftover = leftoverIndexLocks.get(lockPath);
+    if (leftover) {
+      // Claimed synchronously, so only one caller in this process takes it over.
+      leftoverIndexLocks.delete(lockPath);
+      if (await isOwnLeftoverLock(lockPath, leftover)) {
+        console.warn(`[IdeaForge] taking over this process's leftover pages index lock: ${lockPath}`);
+        return { lockPath, handle: null, identity: leftover };
+      }
+    }
     try {
       const handle = await open(lockPath, "wx", 0o600);
+      let identity;
       try {
-        await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, nonce: LOCK_NONCE, createdAt: new Date().toISOString() })}\n`, "utf8");
+        const info = await handle.stat();
+        identity = { dev: info.dev, ino: info.ino };
       } catch (error) {
         await handle.close();
         await unlink(lockPath).catch(() => {});
         throw error;
       }
-      return { lockPath, handle };
+      return { lockPath, handle, identity };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       const verdict = await inspectIndexLock(lockPath);
@@ -211,6 +230,17 @@ async function acquireIndexLock(indexPath) {
       }
       await wait(25 + Math.floor(Math.random() * 25));
     }
+  }
+}
+
+async function isOwnLeftoverLock(lockPath, identity) {
+  try {
+    const current = await lstat(lockPath);
+    if (current.dev !== identity.dev || current.ino !== identity.ino) return false;
+    const metadata = JSON.parse(await readFile(lockPath, "utf8"));
+    return metadata?.pid === process.pid && metadata?.nonce === LOCK_NONCE;
+  } catch {
+    return false;
   }
 }
 
@@ -274,6 +304,9 @@ async function inspectIndexLock(lockPath) {
       return { abandoned: true, snapshot, reason: `unreadable lock older than ${Math.round(UNREADABLE_LOCK_MAX_AGE_MS / 1000)}s` };
     }
     return { abandoned: false, snapshot, reason: `unreadable lock, age ${Math.round(ageMs / 1000)}s` };
+  }
+  if (pid === process.pid && metadata.nonce !== LOCK_NONCE) {
+    return { abandoned: true, snapshot, reason: `pid ${pid} is this process, but an earlier process with that pid wrote the lock` };
   }
   try {
     process.kill(pid, 0);
@@ -349,20 +382,19 @@ export async function updatePagesIndex(update, { indexPath = PAGES_JSON } = {}) 
     written = true;
     return next;
   } finally {
-    await lock.handle.close();
+    if (lock.handle) await lock.handle.close();
     try {
       await unlink(lock.lockPath);
     } catch (error) {
       if (error.code !== "ENOENT") {
-        // A lock left behind blocks later writers, so never drop this silently. But a throw
-        // here would replace the body's own error, so only throw when the body succeeded.
-        if (written) {
-          throw new Error(
-            `pages index was written, but its lock file could not be removed (${error.code || error.message}): ${lock.lockPath}`,
-            { cause: error },
-          );
-        }
-        console.warn(`[IdeaForge] warning: could not remove pages index lock after a failed update (${error.code || error.message}): ${lock.lockPath}`);
+        // A lock left behind blocks later writers, so never drop this silently. Do not throw:
+        // that would replace the body's own result or error (a 500 for a page that is already
+        // indexed). Remember the lock instead, so the next update in this process takes it over.
+        leftoverIndexLocks.set(lock.lockPath, lock.identity);
+        const reason = error.code || error.message;
+        console.warn(written
+          ? `[IdeaForge] warning: pages index was written, but its lock file could not be removed (${reason}); this process takes it over on its next update: ${lock.lockPath}`
+          : `[IdeaForge] warning: could not remove pages index lock after a failed update (${reason}); this process takes it over on its next update: ${lock.lockPath}`);
       }
     }
   }
