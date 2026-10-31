@@ -2,7 +2,7 @@
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { copyFile, lstat, mkdir, open, opendir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +15,7 @@ const PAGES_DIR = path.join(ROOT, "pages");
 const PAGES_JSON = path.join(ROOT, "pages.json");
 const INPUTS_DIR = path.join(ROOT, "inputs");
 const DEFAULT_PORT = 8765;
+const ENGINES = new Set(["codex", "claude", "ollama"]);
 const DEFAULT_CATEGORY = "炼金成品";
 const INDEX_LOCK_TIMEOUT_MS = 5_000;
 // A lock file that is empty or unparseable is only treated as abandoned once it
@@ -96,7 +97,7 @@ export function parseArgs(argv) {
   if (!Number.isInteger(parsed.port) || parsed.port < 1 || parsed.port > 65535) {
     throw new Error(`Invalid --port value: ${parsed.port}`);
   }
-  if (!["codex", "claude", "ollama"].includes(parsed.engine)) {
+  if (!ENGINES.has(parsed.engine)) {
     throw new Error(`Invalid --engine value: ${parsed.engine}`);
   }
   return parsed;
@@ -497,6 +498,11 @@ async function openFile(filePath) {
 }
 
 export async function forge(input, { engine = "codex", ingestOnly = false, shouldOpen = true } = {}) {
+  // Reject an unknown engine before ingest runs: otherwise a bad engine name
+  // still fetches the URL / copies the image and writes an archive record.
+  if (!ingestOnly && !ENGINES.has(String(engine || "").trim().toLowerCase())) {
+    throw new HttpError(400, `Unknown engine "${engine}". Expected one of: ${[...ENGINES].join(", ")}.`);
+  }
   const type = await classifyInput(input);
   if (!ingestOnly) await assertLocalProfileReady();
   const record = await ingest(input, type);
@@ -804,22 +810,26 @@ function readRequestBody(req, limitBytes = 2 * 1024 * 1024) {
   });
 }
 
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
 function parseGeneratePayload(body) {
   let payload;
   try {
-    payload = JSON.parse(body);
+    payload = JSON.parse(body || "{}");
   } catch {
-    throw requestError(400, "Invalid JSON request body.");
+    throw new HttpError(400, "Request body must be valid JSON.");
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)
-    || typeof payload.input !== "string" || !payload.input.trim()) {
-    throw requestError(400, "Missing or invalid required field: input must be a non-empty string.");
-  }
-  const engine = payload.engine === undefined ? "codex" : payload.engine;
-  if (!["codex", "claude", "ollama"].includes(engine)) {
-    throw requestError(400, "Invalid engine. Expected codex, claude, or ollama.");
-  }
-  return { input: payload.input, engine };
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new HttpError(400, "Request body must be a JSON object.");
+  const input = String(payload.input ?? "").trim();
+  if (!input) throw new HttpError(400, "Missing required field: input");
+  const engine = String(payload.engine || "codex").trim().toLowerCase();
+  if (!ENGINES.has(engine)) throw new HttpError(400, `Unknown engine "${payload.engine}". Expected one of: ${[...ENGINES].join(", ")}.`);
+  return { input, engine };
 }
 
 function sendJson(res, statusCode, data) {
@@ -953,13 +963,8 @@ export async function serve({
           sendJson(res, 401, { error: "Missing or invalid X-Forge-Token." });
           return;
         }
-        const body = await readRequestBody(req);
-        const payload = parseGeneratePayload(body);
-        const result = await forgePage(payload.input, {
-          engine: payload.engine,
-          ingestOnly: false,
-          shouldOpen: false,
-        });
+        const { input, engine } = parseGeneratePayload(await readRequestBody(req));
+        const result = await forgePage(input, { engine, ingestOnly: false, shouldOpen: false });
         sendJson(res, 200, result.entry);
         return;
       }
@@ -970,7 +975,11 @@ export async function serve({
       res.writeHead(405);
       res.end("Method not allowed");
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message });
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, Number.isInteger(error?.statusCode) ? error.statusCode : 500, { error: error.message });
     }
   });
 
@@ -1046,7 +1055,20 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Compare against the real path so the CLI also runs when invoked through a
+// symlink (npm `bin` link, ~/.local/bin/forge), and tolerate being imported
+// from a context without a script path (REPL, `node -e`).
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return import.meta.url === pathToFileURL(entry).href;
+  }
+}
+
+if (isMainModule()) {
   main().catch((error) => {
     console.error(`[IdeaForge] ${error.message}`);
     process.exitCode = 1;
@@ -1059,5 +1081,6 @@ export const __test__ = {
   extractTags,
   writeNewPage,
   archiveReference,
+  parseGeneratePayload,
   readRequestBody,
 };
