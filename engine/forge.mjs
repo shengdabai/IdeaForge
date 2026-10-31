@@ -412,22 +412,32 @@ export async function appendPageIndex(entry) {
 
 // Append-only: existing entries (and any extra fields on them, e.g. stale or remap
 // markers) are never replaced or collapsed. A new entry whose identity already
-// exists in the index read under the lock is skipped. Returns the entries added.
+// exists in the index read under the lock is skipped, as is a copied page whose
+// source is already registered in the same category. Returns the entries added
+// and the skipped copies of an already registered source.
 async function appendPageIndexes(entries) {
   const added = [];
-  if (!entries.length) return added;
+  const duplicateCopies = [];
+  if (!entries.length) return { added, duplicateCopies };
   await updatePagesIndex((list) => {
     const entryKey = (item) => item.htmlPath ? `path:${item.htmlPath}` : `slug:${item.slug}`;
     const present = new Set(list.map(entryKey));
+    const sources = new Set(list.map(importedSourceIdentity).filter(Boolean));
     for (const entry of entries) {
       const key = entryKey(entry);
       if (present.has(key)) continue;
+      const source = entry.htmlPath?.startsWith("pages/") ? importedSourceIdentity(entry) : null;
+      if (source && sources.has(source)) {
+        duplicateCopies.push(entry);
+        continue;
+      }
       present.add(key);
+      if (source) sources.add(source);
       added.push(entry);
     }
     return [...list, ...added];
   });
-  return added;
+  return { added, duplicateCopies };
 }
 
 function sourceFromRecord(record) {
@@ -646,6 +656,7 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
   const sourceIdentity = (source, category) => JSON.stringify([source, category]);
   const copiedSources = new Set(existing.map(importedSourceIdentity).filter(Boolean));
   const imported = [];
+  const copiedFiles = new Map();
   const categoryCounts = new Map();
   const skipped = {
     duplicate: 0,
@@ -696,6 +707,7 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
         }
         const target = await copyToAvailableTarget(filePath, primary, usedPaths);
         htmlPath = target.relative;
+        copiedFiles.set(htmlPath, target.absolute);
         copiedSources.add(identity);
       } else {
         htmlPath = path.resolve(filePath);
@@ -716,16 +728,24 @@ export async function importPages(dir, { category = "", copy = true, exclude = "
         createdAt: new Date().toISOString().slice(0, 10),
         htmlPath,
       });
-      categoryCounts.set(pageCategory, (categoryCounts.get(pageCategory) || 0) + 1);
     } catch (error) {
       skipped.error += 1;
       console.error(`[import] failed ${filePath}: ${error.message}`);
     }
   }
 
-  const added = await appendPageIndexes(imported);
-  // Entries another writer registered between our scan and taking the lock.
+  const { added, duplicateCopies } = await appendPageIndexes(imported);
+  // Entries another writer registered between our scan and taking the lock; a copy
+  // of a source that a concurrent import registered first is removed again.
   skipped.duplicate += imported.length - added.length;
+  for (const entry of duplicateCopies) {
+    await unlink(copiedFiles.get(entry.htmlPath)).catch((error) => {
+      console.error(`[import] could not remove duplicate copy ${entry.htmlPath}: ${error.message}`);
+    });
+  }
+  for (const entry of added) {
+    categoryCounts.set(entry.category, (categoryCounts.get(entry.category) || 0) + 1);
+  }
 
   const skippedTotal = Object.values(skipped).reduce((a, b) => a + b, 0);
   console.log(`[import] done: imported ${added.length}, skipped ${skippedTotal}, scanned ${scanned}`);

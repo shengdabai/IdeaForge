@@ -193,3 +193,17 @@ test("a copy import skips a source already registered by a --link import", async
     await assert.rejects(readdir(path.join(root, "pages", "archive")), { code: "ENOENT" });
   });
 });
+
+test("concurrent copy imports of the same source keep one copy and one index entry", async () => {
+  await withImportFixture(async ({ root, importPages, source }) => {
+    const original = await source("one", "Same source");
+    const results = await Promise.all(Array.from({ length: 4 }, () => importPages(original.file, { category: "archive" })));
+    assert.equal(results.reduce((sum, result) => sum + result.imported, 0), 1);
+    assert.equal(results.reduce((sum, result) => sum + result.skipped.duplicate, 0), 3);
+    assert.deepEqual(results.map((result) => result.categoryCounts.archive || 0).sort(), [0, 0, 0, 1]);
+    const entries = JSON.parse(await readFile(path.join(root, "pages.json"), "utf8"));
+    assert.equal(entries.length, 1);
+    assert.deepEqual(await readdir(path.join(root, "pages", "archive")), [path.basename(entries[0].htmlPath)]);
+    assert.equal(await readFile(path.join(root, entries[0].htmlPath), "utf8"), original.html);
+  });
+});
