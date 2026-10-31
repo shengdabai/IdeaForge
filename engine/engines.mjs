@@ -1,19 +1,16 @@
-import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runProcess } from "./run-process.mjs";
 
 const DEFAULT_ENGINE = "codex";
 const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 900;
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+const ENGINE_ENV = { NO_COLOR: "1", TERM: "dumb" };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function stripAnsi(text) {
-  return String(text || "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function normalizeEngineName(engineName) {
@@ -24,51 +21,47 @@ function normalizeEngineName(engineName) {
   return name;
 }
 
-function runProcess(command, args, { input, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
-    });
+/**
+ * Build the CLI invocation for an engine. The prompt is always delivered on
+ * stdin: it embeds the golden template plus the ingested article, so it can
+ * exceed the kernel argv limits (1 MiB total on macOS, 128 KiB per argument on
+ * Linux) when passed as a command-line argument.
+ */
+export function engineInvocation(engineName, prompt, { outputFile = "" } = {}) {
+  switch (normalizeEngineName(engineName)) {
+    case "codex":
+      return {
+        command: "codex",
+        args: [
+          "exec",
+          "--skip-git-repo-check",
+          "--ephemeral",
+          "--sandbox",
+          "read-only",
+          "--color",
+          "never",
+          ...(outputFile ? ["--output-last-message", outputFile] : []),
+          "-",
+        ],
+        input: prompt,
+      };
+    case "claude":
+      return { command: "claude", args: ["-p", "--output-format", "text", "--no-session-persistence"], input: prompt };
+    case "ollama": {
+      const model = process.env.IDEAFORGE_OLLAMA_MODEL || process.env.OLLAMA_MODEL || "qwen3-coder:30b";
+      return { command: "ollama", args: ["run", model, "--hidethinking"], input: prompt, model };
+    }
+    default:
+      throw new Error(`Unsupported engine: ${engineName}`);
+  }
+}
 
-    let stdout = "";
-    let stderr = "";
-    let done = false;
-
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      child.kill("SIGTERM");
-      reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`));
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      reject(new Error(`Failed to start ${command}: ${error.message}`));
-    });
-    child.on("close", (code) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      const cleanStdout = stripAnsi(stdout).trim();
-      const cleanStderr = stripAnsi(stderr).trim();
-      if (code === 0) {
-        resolve({ stdout: cleanStdout, stderr: cleanStderr });
-        return;
-      }
-      reject(new Error(`${command} exited with code ${code}${cleanStderr ? `: ${cleanStderr}` : ""}`));
-    });
-
-    if (input) child.stdin.end(input);
-    else child.stdin.end();
+function runEngineProcess(invocation) {
+  return runProcess(invocation.command, invocation.args, {
+    input: invocation.input,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    env: ENGINE_ENV,
+    stripAnsiOutput: true,
   });
 }
 
@@ -76,19 +69,7 @@ async function runCodex(prompt) {
   const dir = await mkdtemp(path.join(tmpdir(), "ideaforge-codex-"));
   const outputFile = path.join(dir, "last-message.txt");
   try {
-    const args = [
-      "exec",
-      "--skip-git-repo-check",
-      "--ephemeral",
-      "--sandbox",
-      "read-only",
-      "--color",
-      "never",
-      "--output-last-message",
-      outputFile,
-      "-",
-    ];
-    const result = await runProcess("codex", args, { input: prompt });
+    const result = await runEngineProcess(engineInvocation("codex", prompt, { outputFile }));
     try {
       const finalMessage = (await readFile(outputFile, "utf8")).trim();
       if (finalMessage) return finalMessage;
@@ -108,17 +89,15 @@ async function runClaude(prompt) {
   console.error(
     "[IdeaForge] Warning: claude -p may use the independent Claude Code/API budget from 2026-06-15. Default engine remains codex.",
   );
-  const args = ["-p", "--output-format", "text", "--no-session-persistence", prompt];
-  const result = await runProcess("claude", args);
+  const result = await runEngineProcess(engineInvocation("claude", prompt));
   if (!result.stdout) throw new Error("claude returned empty output.");
   return result.stdout;
 }
 
 async function runOllama(prompt) {
-  const model = process.env.IDEAFORGE_OLLAMA_MODEL || process.env.OLLAMA_MODEL || "qwen3-coder:30b";
-  const args = ["run", model, "--hidethinking", prompt];
-  const result = await runProcess("ollama", args);
-  if (!result.stdout) throw new Error(`ollama model "${model}" returned empty output.`);
+  const invocation = engineInvocation("ollama", prompt);
+  const result = await runEngineProcess(invocation);
+  if (!result.stdout) throw new Error(`ollama model "${invocation.model}" returned empty output.`);
   return result.stdout;
 }
 
@@ -136,24 +115,28 @@ async function runOnce(engineName, prompt) {
   }
 }
 
-export async function run(engineName = DEFAULT_ENGINE, prompt) {
+export async function run(engineName = DEFAULT_ENGINE, prompt, { attempt: runAttempt = runOnce, maxAttempts = MAX_ATTEMPTS, baseDelayMs = BASE_DELAY_MS } = {}) {
   const engine = normalizeEngineName(engineName);
   const errors = [];
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const output = await runOnce(engine, prompt);
+      const output = await runAttempt(engine, prompt);
       const text = String(output || "").trim();
       if (!text) throw new Error(`${engine} returned empty output.`);
       return text;
     } catch (error) {
       errors.push(`attempt ${attempt}: ${error.message}`);
-      if (attempt < MAX_ATTEMPTS) await sleep(BASE_DELAY_MS * 2 ** (attempt - 1));
+      // A CLI that cannot even start (not installed, not on PATH) will not
+      // appear on the next attempt; retrying only delays the real message.
+      if (error?.spawnFailed) {
+        throw new Error(`Engine "${engine}" could not be started. Is the "${engine}" CLI installed and on PATH?\n${errors.join("\n")}`);
+      }
+      if (attempt < maxAttempts) await sleep(baseDelayMs * 2 ** (attempt - 1));
     }
   }
-  throw new Error(`Engine "${engine}" failed after ${MAX_ATTEMPTS} attempts:\n${errors.join("\n")}`);
+  throw new Error(`Engine "${engine}" failed after ${maxAttempts} attempts:\n${errors.join("\n")}`);
 }
 
 export const __test__ = {
   normalizeEngineName,
-  stripAnsi,
 };

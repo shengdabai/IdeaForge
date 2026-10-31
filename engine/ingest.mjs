@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { runProcess } from "./run-process.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -25,42 +25,7 @@ export async function resolveImagePath(input) {
   return "";
 }
 
-function runProcess(command, args, { input, timeoutMs = 45_000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let done = false;
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      child.kill("SIGTERM");
-      reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`));
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      reject(new Error(`Failed to start ${command}: ${error.message}`));
-    });
-    child.on("close", (code) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${command} exited with code ${code}: ${stderr.trim()}`));
-    });
-    if (input) child.stdin.end(input);
-    else child.stdin.end();
-  });
-}
+const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v1/scrape";
 
 function safePart(input, fallback = "input") {
   const cleaned = String(input || "")
@@ -84,9 +49,9 @@ async function ensureInputsDir() {
   await mkdir(INPUTS_DIR, { recursive: true });
 }
 
-async function archiveRecord(record, label) {
-  await ensureInputsDir();
-  const file = path.join(INPUTS_DIR, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}-${randomUUID()}.json`);
+async function archiveRecord(record, label, { inputsDir = INPUTS_DIR } = {}) {
+  await mkdir(inputsDir, { recursive: true });
+  const file = path.join(inputsDir, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}-${randomUUID()}.json`);
   await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
   return file;
 }
@@ -132,24 +97,22 @@ function isWechatUrl(url) {
   }
 }
 
+// The API key travels in a curl config read from stdin (`-K -`), so it never
+// appears in the process table (`ps`) or in a crash report's argv.
+export function firecrawlCurlInvocation(url, key, { endpoint = FIRECRAWL_SCRAPE_URL } = {}) {
+  if (/[\r\n"]/u.test(String(key))) throw new Error("Firecrawl API key contains characters that cannot be passed safely.");
+  const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
+  return {
+    command: "curl",
+    args: ["-sS", "--fail", "-K", "-", "-X", "POST", endpoint, "-H", "Content-Type: application/json", "--data", body],
+    input: `header = "Authorization: Bearer ${key}"\n`,
+  };
+}
+
 async function fetchWithFirecrawl(url, key) {
   if (/[\r\n]/.test(key)) throw new Error("Firecrawl API key must not contain line breaks.");
-  const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
-  const result = await runProcess(
-    "curl",
-    [
-      "-sS",
-      "--fail",
-      "-X",
-      "POST",
-      "https://api.firecrawl.dev/v1/scrape",
-      "-H",
-      "@-",
-      "--data",
-      body,
-    ],
-    { input: `Authorization: Bearer ${key}\nContent-Type: application/json\n`, timeoutMs: 90_000 },
-  );
+  const invocation = firecrawlCurlInvocation(url, key);
+  const result = await runProcess(invocation.command, invocation.args, { input: invocation.input, timeoutMs: 90_000 });
   const parsed = JSON.parse(result.stdout);
   const data = parsed.data || parsed;
   const rawContent = data.markdown || data.content || data.html || "";
@@ -233,6 +196,12 @@ async function ingestUrl(input) {
   return record;
 }
 
+export function ollamaBaseUrl() {
+  const raw = String(process.env.OLLAMA_HOST || "").trim();
+  if (!raw) return "http://127.0.0.1:11434";
+  return /^https?:\/\//iu.test(raw) ? raw.replace(/\/+$/u, "") : `http://${raw.replace(/\/+$/u, "")}`;
+}
+
 async function describeImageWithOllama(imagePath) {
   const model = process.env.IDEAFORGE_VISION_MODEL || process.env.OLLAMA_VISION_MODEL || "qwen2.5vl:7b";
   const imageBase64 = await readFile(imagePath, "base64");
@@ -243,10 +212,12 @@ async function describeImageWithOllama(imagePath) {
     images: [imageBase64],
     stream: false,
   });
+  // The base64 image goes through stdin: as an argv entry it exceeds the 1 MiB
+  // argument limit for any photo above ~700 KB and curl never starts (E2BIG).
   const result = await runProcess(
     "curl",
-    ["-sS", "--fail", "http://127.0.0.1:11434/api/generate", "-H", "Content-Type: application/json", "--data", payload],
-    { timeoutMs: 120_000 },
+    ["-sS", "--fail", `${ollamaBaseUrl()}/api/generate`, "-H", "Content-Type: application/json", "--data-binary", "@-"],
+    { input: payload, timeoutMs: 120_000 },
   );
   const parsed = JSON.parse(result.stdout);
   return parsed.response || "";
@@ -316,4 +287,6 @@ export const __test__ = {
   parseEnvFile,
   safePart,
   fetchWithFirecrawl,
+  archiveRecord,
+  describeImageWithOllama,
 };
