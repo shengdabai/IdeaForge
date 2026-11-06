@@ -841,7 +841,8 @@ function parseGeneratePayload(body) {
   }
   const input = String(payload.input ?? "").trim();
   if (!input) throw new HttpError(400, "Missing required field: input");
-  const engine = String(payload.engine || "codex").trim().toLowerCase();
+  // An omitted engine means the default; an empty or non-string engine is a client error.
+  const engine = payload.engine === undefined ? "codex" : typeof payload.engine === "string" ? payload.engine.trim().toLowerCase() : "";
   if (!ENGINES.has(engine)) throw new HttpError(400, `Unknown engine "${payload.engine}". Expected one of: ${[...ENGINES].join(", ")}.`);
   return { input, engine };
 }

@@ -164,7 +164,7 @@ test("static routes reject sensitive filenames and symlinks into hidden files", 
   try {
     await mkdir(path.join(root, "engine"));
     await mkdir(path.join(root, "pages"));
-    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "engines.mjs"].map((name) =>
+    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "engines.mjs", "run-process.mjs"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
     await writeFile(path.join(root, "pages", ".private-note"), "Synthetic private fixture");
     await symlink(".private-note", path.join(root, "pages", "visible.html"));

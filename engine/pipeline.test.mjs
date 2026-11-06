@@ -11,7 +11,7 @@ test("local generation pipeline validates profile, keeps source records, and ind
   try {
     await mkdir(path.join(root, "engine"), { recursive: true });
     await mkdir(path.join(root, "templates"));
-    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "prompt.md"].map((name) =>
+    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "run-process.mjs", "prompt.md"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
     await writeFile(path.join(root, "templates", "golden.html"), "<!DOCTYPE html><html><body>Golden fixture</body></html>");
     // No real CLI or model can run: the complete adapter is replaced in this fixture.
@@ -68,7 +68,7 @@ test("generated pages whose titles look like secrets still get a servable filena
   try {
     await mkdir(path.join(root, "engine"), { recursive: true });
     await mkdir(path.join(root, "templates"));
-    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "prompt.md"].map((name) =>
+    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "run-process.mjs", "prompt.md"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
     await writeFile(path.join(root, "templates", "golden.html"), "<!DOCTYPE html><html><body>Golden fixture</body></html>");
     await writeFile(path.join(root, "profile.local.md"),

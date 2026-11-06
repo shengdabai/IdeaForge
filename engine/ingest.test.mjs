@@ -9,7 +9,7 @@ async function withIngestFixture(run) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "ideaforge-ingest-test-")));
   try {
     await mkdir(path.join(root, "engine"));
-    await Promise.all(["ingest.mjs", "forge.mjs", "generate.mjs", "engines.mjs"].map((name) =>
+    await Promise.all(["ingest.mjs", "forge.mjs", "generate.mjs", "engines.mjs", "run-process.mjs"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
     const modulePath = path.join(root, "engine", "ingest.mjs");
     const { ingest, __test__ } = await import(pathToFileURL(modulePath).href);

@@ -11,7 +11,7 @@ test("provenance regression runs from a project path with Chinese, spaces and pe
     const root = path.join(temporary, "中文 workspace %");
     const engine = path.join(root, "engine");
     await mkdir(engine, { recursive: true });
-    await Promise.all(["forge.mjs", "forge.test.mjs", "ingest.mjs", "generate.mjs", "engines.mjs"].map((name) =>
+    await Promise.all(["forge.mjs", "forge.test.mjs", "ingest.mjs", "generate.mjs", "engines.mjs", "run-process.mjs"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(engine, name))));
     let result;
     try {
