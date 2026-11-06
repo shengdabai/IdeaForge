@@ -97,6 +97,7 @@ node engine/forge.mjs import <dir> [--category=name] [--copy|--link] [--exclude=
 - If a `.env.example` file exists, treat it as documentation only; never commit filled-in `.env` files.
 - Before publishing screenshots, demos, or client examples, remove private names, internal paths, account IDs, and API endpoints.
 - The `Repository Hygiene` workflow is a lightweight guardrail, not a replacement for product-specific tests.
+- The `ollama` engine and Ollama image reading (`IDEAFORGE_VISION_MODEL`) use `OLLAMA_HOST` when it is set; otherwise they call `http://127.0.0.1:11434`.
 
 ## Delivery Checklist
 

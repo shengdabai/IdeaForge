@@ -2,7 +2,7 @@
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { copyFile, lstat, mkdir, open, opendir, readdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +15,7 @@ const PAGES_DIR = path.join(ROOT, "pages");
 const PAGES_JSON = path.join(ROOT, "pages.json");
 const INPUTS_DIR = path.join(ROOT, "inputs");
 const DEFAULT_PORT = 8765;
+const ENGINES = new Set(["codex", "claude", "ollama"]);
 const DEFAULT_CATEGORY = "炼金成品";
 const INDEX_LOCK_TIMEOUT_MS = 5_000;
 // A lock file that is empty or unparseable is only treated as abandoned once it
@@ -78,7 +79,7 @@ export function parseArgs(argv) {
     else if (arg === "--self-test") parsed.selfTest = true;
     else if (arg === "--copy") parsed.importCopy = true;
     else if (arg === "--link") parsed.importCopy = false;
-    else if (arg.startsWith("--engine=")) parsed.engine = arg.slice("--engine=".length);
+    else if (arg.startsWith("--engine=")) parsed.engine = arg.slice("--engine=".length).trim().toLowerCase();
     else if (arg.startsWith("--port=")) parsed.port = Number(arg.slice("--port=".length));
     else if (arg.startsWith("--category=")) parsed.importCategory = arg.slice("--category=".length).trim();
     else if (arg.startsWith("--exclude=")) parsed.importExclude = arg.slice("--exclude=".length).trim();
@@ -96,7 +97,7 @@ export function parseArgs(argv) {
   if (!Number.isInteger(parsed.port) || parsed.port < 1 || parsed.port > 65535) {
     throw new Error(`Invalid --port value: ${parsed.port}`);
   }
-  if (!["codex", "claude", "ollama"].includes(parsed.engine)) {
+  if (!ENGINES.has(parsed.engine)) {
     throw new Error(`Invalid --engine value: ${parsed.engine}`);
   }
   return parsed;
@@ -111,14 +112,24 @@ function slugify(input, fallback = "page") {
   return slug || fallback;
 }
 
+const NAMED_ENTITIES = { ldquo: "\u201C", rdquo: "\u201D", lsquo: "\u2018", rsquo: "\u2019", hellip: "\u2026", mdash: "\u2014", ndash: "\u2013", copy: "\u00A9" };
+
+// Decode &#NNN; / &#xHHH; references; an out-of-range code point is left as-is.
+function decodeNumericEntity(match, hex, dec) {
+  const codePoint = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(dec, 10);
+  if (!Number.isFinite(codePoint) || codePoint <= 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return match;
+  return String.fromCodePoint(codePoint);
+}
+
 function decodeBasicEntities(text) {
   return String(text || "")
     .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'");
+    .replace(/&(ldquo|rdquo|lsquo|rsquo|hellip|mdash|ndash|copy);/g, (match, name) => NAMED_ENTITIES[name] ?? match)
+    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, decodeNumericEntity)
+    .replace(/&amp;/gi, "&");
 }
 
 function extractTitle(html, fallback) {
@@ -497,6 +508,11 @@ async function openFile(filePath) {
 }
 
 export async function forge(input, { engine = "codex", ingestOnly = false, shouldOpen = true } = {}) {
+  // Reject an unknown engine before ingest runs: otherwise a bad engine name
+  // still fetches the URL / copies the image and writes an archive record.
+  if (!ingestOnly && !ENGINES.has(String(engine || "").trim().toLowerCase())) {
+    throw new HttpError(400, `Unknown engine "${engine}". Expected one of: ${[...ENGINES].join(", ")}.`);
+  }
   const type = await classifyInput(input);
   if (!ingestOnly) await assertLocalProfileReady();
   const record = await ingest(input, type);
@@ -761,7 +777,8 @@ function contentType(filePath) {
   if (ext === ".json") return "application/json; charset=utf-8";
   if (ext === ".css") return "text/css; charset=utf-8";
   if (ext === ".js" || ext === ".mjs") return "text/javascript; charset=utf-8";
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(ext)) return `image/${ext.slice(1).replace("jpg", "jpeg")}`;
+  if (ext === ".svg") return "image/svg+xml";
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) return `image/${ext.slice(1).replace("jpg", "jpeg")}`;
   return "application/octet-stream";
 }
 
@@ -804,22 +821,30 @@ function readRequestBody(req, limitBytes = 2 * 1024 * 1024) {
   });
 }
 
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
 function parseGeneratePayload(body) {
   let payload;
   try {
-    payload = JSON.parse(body);
+    payload = JSON.parse(body || "{}");
   } catch {
-    throw requestError(400, "Invalid JSON request body.");
+    throw new HttpError(400, "Request body must be valid JSON.");
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)
-    || typeof payload.input !== "string" || !payload.input.trim()) {
-    throw requestError(400, "Missing or invalid required field: input must be a non-empty string.");
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new HttpError(400, "Request body must be a JSON object.");
+  if (payload.input !== undefined && payload.input !== null && typeof payload.input !== "string") {
+    throw new HttpError(400, "Field input must be a string.");
   }
-  const engine = payload.engine === undefined ? "codex" : payload.engine;
-  if (!["codex", "claude", "ollama"].includes(engine)) {
-    throw requestError(400, "Invalid engine. Expected codex, claude, or ollama.");
-  }
-  return { input: payload.input, engine };
+  const input = String(payload.input ?? "").trim();
+  if (!input) throw new HttpError(400, "Missing required field: input");
+  // An omitted engine means the default; an empty or non-string engine is a client error.
+  const engine = payload.engine === undefined ? "codex" : typeof payload.engine === "string" ? payload.engine.trim().toLowerCase() : "";
+  if (!ENGINES.has(engine)) throw new HttpError(400, `Unknown engine "${payload.engine}". Expected one of: ${[...ENGINES].join(", ")}.`);
+  return { input, engine };
 }
 
 function sendJson(res, statusCode, data) {
@@ -953,13 +978,8 @@ export async function serve({
           sendJson(res, 401, { error: "Missing or invalid X-Forge-Token." });
           return;
         }
-        const body = await readRequestBody(req);
-        const payload = parseGeneratePayload(body);
-        const result = await forgePage(payload.input, {
-          engine: payload.engine,
-          ingestOnly: false,
-          shouldOpen: false,
-        });
+        const { input, engine } = parseGeneratePayload(await readRequestBody(req));
+        const result = await forgePage(input, { engine, ingestOnly: false, shouldOpen: false });
         sendJson(res, 200, result.entry);
         return;
       }
@@ -970,7 +990,11 @@ export async function serve({
       res.writeHead(405);
       res.end("Method not allowed");
     } catch (error) {
-      sendJson(res, error.statusCode || 500, { error: error.message });
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, Number.isInteger(error?.statusCode) ? error.statusCode : 500, { error: error.message });
     }
   });
 
@@ -1046,7 +1070,20 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Compare against the real path so the CLI also runs when invoked through a
+// symlink (npm `bin` link, ~/.local/bin/forge), and tolerate being imported
+// from a context without a script path (REPL, `node -e`).
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return import.meta.url === pathToFileURL(entry).href;
+  }
+}
+
+if (isMainModule()) {
   main().catch((error) => {
     console.error(`[IdeaForge] ${error.message}`);
     process.exitCode = 1;
@@ -1059,5 +1096,6 @@ export const __test__ = {
   extractTags,
   writeNewPage,
   archiveReference,
+  parseGeneratePayload,
   readRequestBody,
 };

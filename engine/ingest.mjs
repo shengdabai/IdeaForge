@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { runProcess } from "./run-process.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -12,7 +12,8 @@ const INPUTS_DIR = path.join(ROOT, "inputs");
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"]);
 
 export async function resolveImagePath(input) {
-  const value = String(input || "").trim();
+  // The dashboard has no shell to expand "~/Pictures/x.png"; expand it here.
+  const value = expandHomePath(String(input || "").trim());
   // Preserve project-relative lookup before caller-relative lookup in both stages.
   for (const candidate of new Set([path.resolve(ROOT, value), path.resolve(value)])) {
     if (!IMAGE_EXTENSIONS.has(path.extname(candidate).toLowerCase())) continue;
@@ -25,42 +26,7 @@ export async function resolveImagePath(input) {
   return "";
 }
 
-function runProcess(command, args, { input, timeoutMs = 45_000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let done = false;
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      child.kill("SIGTERM");
-      reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`));
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      reject(new Error(`Failed to start ${command}: ${error.message}`));
-    });
-    child.on("close", (code) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${command} exited with code ${code}: ${stderr.trim()}`));
-    });
-    if (input) child.stdin.end(input);
-    else child.stdin.end();
-  });
-}
+const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v1/scrape";
 
 function safePart(input, fallback = "input") {
   const cleaned = String(input || "")
@@ -76,6 +42,15 @@ function safePart(input, fallback = "input") {
   return bounded || fallback;
 }
 
+// Expand a leading "~" or "~/" to the home directory. Shells do this for CLI
+// arguments; the dashboard and programmatic callers pass the raw string.
+export function expandHomePath(input) {
+  const value = String(input || "");
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
+  return value;
+}
+
 function timestampSlug(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, "-");
 }
@@ -84,9 +59,9 @@ async function ensureInputsDir() {
   await mkdir(INPUTS_DIR, { recursive: true });
 }
 
-async function archiveRecord(record, label) {
-  await ensureInputsDir();
-  const file = path.join(INPUTS_DIR, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}-${randomUUID()}.json`);
+async function archiveRecord(record, label, { inputsDir = INPUTS_DIR } = {}) {
+  await mkdir(inputsDir, { recursive: true });
+  const file = path.join(inputsDir, `${timestampSlug(new Date(record.fetchedAt))}-${safePart(label)}-${randomUUID()}.json`);
   await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
   return file;
 }
@@ -132,24 +107,24 @@ function isWechatUrl(url) {
   }
 }
 
+// The API key travels in a curl config read from stdin (`-K -`), so it never
+// appears in the process table (`ps`) or in a crash report's argv. Inside a
+// quoted config value curl unescapes backslash sequences and a quote or line
+// break ends the value, so a key containing those cannot be delivered intact.
+export function firecrawlCurlInvocation(url, key, { endpoint = FIRECRAWL_SCRAPE_URL } = {}) {
+  if (/[\r\n"\\]/u.test(String(key))) throw new Error("Firecrawl API key contains characters that cannot be passed safely.");
+  const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
+  return {
+    command: "curl",
+    args: ["-sS", "--fail", "-K", "-", "-X", "POST", endpoint, "-H", "Content-Type: application/json", "--data", body],
+    input: `header = "Authorization: Bearer ${key}"\n`,
+  };
+}
+
 async function fetchWithFirecrawl(url, key) {
   if (/[\r\n]/.test(key)) throw new Error("Firecrawl API key must not contain line breaks.");
-  const body = JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true });
-  const result = await runProcess(
-    "curl",
-    [
-      "-sS",
-      "--fail",
-      "-X",
-      "POST",
-      "https://api.firecrawl.dev/v1/scrape",
-      "-H",
-      "@-",
-      "--data",
-      body,
-    ],
-    { input: `Authorization: Bearer ${key}\nContent-Type: application/json\n`, timeoutMs: 90_000 },
-  );
+  const invocation = firecrawlCurlInvocation(url, key);
+  const result = await runProcess(invocation.command, invocation.args, { input: invocation.input, timeoutMs: 90_000 });
   const parsed = JSON.parse(result.stdout);
   const data = parsed.data || parsed;
   const rawContent = data.markdown || data.content || data.html || "";
@@ -160,14 +135,25 @@ async function fetchWithFirecrawl(url, key) {
   };
 }
 
+const NAMED_ENTITIES = { ldquo: "\u201C", rdquo: "\u201D", lsquo: "\u2018", rsquo: "\u2019", hellip: "\u2026", mdash: "\u2014", ndash: "\u2013", copy: "\u00A9" };
+
+// Decode &#NNN; / &#xHHH; references; an out-of-range code point is left as-is.
+function decodeNumericEntity(match, hex, dec) {
+  const codePoint = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(dec, 10);
+  if (!Number.isFinite(codePoint) || codePoint <= 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return match;
+  return String.fromCodePoint(codePoint);
+}
+
 function decodeBasicEntities(text) {
-  return text
+  // &amp; is decoded last so "&amp;#39;" stays the literal text "&#39;".
+  return String(text || "")
     .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'");
+    .replace(/&(ldquo|rdquo|lsquo|rsquo|hellip|mdash|ndash|copy);/g, (match, name) => NAMED_ENTITIES[name] ?? match)
+    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, decodeNumericEntity)
+    .replace(/&amp;/gi, "&");
 }
 
 function htmlToText(html) {
@@ -177,6 +163,7 @@ function htmlToText(html) {
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
     .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ")
     .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|div|section|article|main|h[1-6]|li|tr)>/gi, "\n")
     .replace(/<[^>]+>/g, " ");
   const rawContent = decodeBasicEntities(body)
@@ -233,6 +220,12 @@ async function ingestUrl(input) {
   return record;
 }
 
+export function ollamaBaseUrl() {
+  const raw = String(process.env.OLLAMA_HOST || "").trim();
+  if (!raw) return "http://127.0.0.1:11434";
+  return /^https?:\/\//iu.test(raw) ? raw.replace(/\/+$/u, "") : `http://${raw.replace(/\/+$/u, "")}`;
+}
+
 async function describeImageWithOllama(imagePath) {
   const model = process.env.IDEAFORGE_VISION_MODEL || process.env.OLLAMA_VISION_MODEL || "qwen2.5vl:7b";
   const imageBase64 = await readFile(imagePath, "base64");
@@ -243,13 +236,20 @@ async function describeImageWithOllama(imagePath) {
     images: [imageBase64],
     stream: false,
   });
+  // The base64 image goes through stdin: as an argv entry it exceeds the 1 MiB
+  // argument limit for any photo above ~700 KB and curl never starts (E2BIG).
   const result = await runProcess(
     "curl",
-    ["-sS", "--fail", "http://127.0.0.1:11434/api/generate", "-H", "Content-Type: application/json", "--data", payload],
-    { timeoutMs: 120_000 },
+    ["-sS", "--fail", `${ollamaBaseUrl()}/api/generate`, "-H", "Content-Type: application/json", "--data-binary", "@-"],
+    { input: payload, timeoutMs: 120_000 },
   );
   const parsed = JSON.parse(result.stdout);
-  return parsed.response || "";
+  const description = String(parsed.response || "").trim();
+  // An empty description would be archived and then fail much later in
+  // buildPrompt with "empty ingested content"; fail here so ingestImage can
+  // fall back to the path-only note instead.
+  if (!description) throw new Error(`ollama vision model "${model}" returned an empty description.`);
+  return description;
 }
 
 async function ingestImage(input) {
@@ -316,4 +316,6 @@ export const __test__ = {
   parseEnvFile,
   safePart,
   fetchWithFirecrawl,
+  archiveRecord,
+  describeImageWithOllama,
 };

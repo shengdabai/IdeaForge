@@ -63,6 +63,9 @@
   .empty{color:var(--ink3);text-align:center;padding:60px 0;border:1px dashed var(--line);border-radius:var(--r);background:rgba(24,26,34,.45)}
   footer{text-align:center;color:var(--ink3);font-size:13px;margin-top:70px}
   code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--acc2)}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  button:disabled{opacity:.55;cursor:progress;transform:none}
+  button:focus-visible,select:focus-visible,.pcard:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
   @media (max-width:720px){
     .wrap{padding:0 16px}
     header{padding-top:38px}
@@ -83,9 +86,11 @@
     <p class="sub">丢进一句话、一张图、一个链接，自动炼成一张专业、可视化、并结合你处境给出启发的深度页面。所有内容存在本地，归你所有。</p>
 
     <div class="composer">
+      <label for="inp" class="sr-only">输入想法、网页链接或图片路径</label>
       <textarea id="inp" aria-label="输入想法、网址或图片路径" placeholder="贴一段想法、一个网页链接，或一张图片的路径…"></textarea>
       <div class="row">
         <span class="hint">自动识别 文字 / 网址 / 图片</span>
+        <label for="engine" class="sr-only">生成引擎</label>
         <select id="engine" aria-label="生成引擎">
           <option value="codex">引擎：Codex（默认 · 省额度）</option>
           <option value="ollama">引擎：本地 Ollama（离线免费）</option>
@@ -93,7 +98,7 @@
         </select>
         <button id="go">炼成页面</button>
       </div>
-      <div class="note" id="status" role="status">提示：请从 <code>forge serve</code> 输出的本地链接打开此页，输入框才可安全生成；也可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
+      <div class="note" id="status" role="status" aria-live="polite">提示：请从 <code>forge serve</code> 输出的本地链接打开此页，输入框才可安全生成；也可在终端用 <code>node engine/forge.mjs "你的想法"</code>。</div>
     </div>
   </header>
 
@@ -152,8 +157,11 @@ function hrefFor(htmlPath){
   const value=String(htmlPath||'#');
   if(value==='#')return value;
   if(value.startsWith('file://')||/^[a-z]+:\/\//i.test(value))return value;
-  if(value.startsWith('/'))return 'file://'+value.split('/').map(encodeURIComponent).join('/');
-  return value.split('/').map(encodeURIComponent).join('/');
+  // Encode each segment: imported file names may contain % or #, which would
+  // otherwise be read as an escape sequence or a fragment by the browser.
+  const encoded=value.split('/').map(encodeURIComponent).join('/');
+  if(value.startsWith('/'))return 'file://'+encoded;
+  return encoded;
 }
 function typeName(type){
   return ({url:'网页',text:'想法',image:'图片',html:'HTML'})[type]||type||'页面';
@@ -204,7 +212,7 @@ function render(){
     group.className='group';
     group.innerHTML=`<button class="group-head" type="button" data-category="${escapeHtml(category)}" aria-expanded="${open?'true':'false'}">
       <span class="group-title"><strong>${escapeHtml(category)}</strong><span>${items.length} 篇${items.length>50?' · 大分类默认折叠':''}</span></span>
-      <span class="chev">${open?'−':'+'}</span>
+      <span class="chev" aria-hidden="true">${open?'−':'+'}</span>
     </button>
     ${open?`<div class="grid">${visible.map(card).join('')}</div>
     ${items.length>visible.length?`<div class="group-more"><button class="secondary small" type="button" data-more="${escapeHtml(category)}">再加载 ${Math.min(BATCH_SIZE,items.length-visible.length)} 篇</button></div>`:''}`:''}`;
@@ -239,11 +247,15 @@ fetch('pages.json',{cache:'no-store'}).then(r=>{
   return r.json();
 }).then(load).catch(()=>load(SEED));
 
-document.getElementById('go').onclick=async()=>{
+const goEl=document.getElementById('go');
+goEl.onclick=async()=>{
   const v=document.getElementById('inp').value.trim();
   const engine=document.getElementById('engine').value;
   if(!v){statusEl.textContent='先输入点东西。';return;}
   if(!dashboardToken){statusEl.innerHTML='缺少本次服务的访问令牌。请从 <code>forge serve</code> 输出的本地链接重新打开 Dashboard（双击 <code>start-dashboard.command</code> 启动时，该链接显示在启动器的终端窗口里）。';return;}
+  if(goEl.disabled)return;
+  goEl.disabled=true;
+  goEl.setAttribute('aria-busy','true');
   statusEl.textContent='炼制中…（需 forge serve 在运行）';
   try{
     const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json','X-Forge-Token':dashboardToken},
@@ -259,6 +271,9 @@ document.getElementById('go').onclick=async()=>{
       return;
     }
     statusEl.textContent=e.message||'本地服务未启动或生成失败。';
+  }finally{
+    goEl.disabled=false;
+    goEl.removeAttribute('aria-busy');
   }
 };
 </script>

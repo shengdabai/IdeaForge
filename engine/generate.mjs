@@ -44,6 +44,14 @@ export function stripHtmlFence(output) {
   if (fence) text = fence[1].trim();
   const doctypeIndex = text.search(/<!DOCTYPE/i);
   if (doctypeIndex > 0) text = text.slice(doctypeIndex).trim();
+  // Models sometimes append a closing fence or a sentence after the document.
+  // Keep everything up to the last </html>; validateHtml still rejects output
+  // that has no closing tag at all.
+  const closeMatches = [...text.matchAll(/<\/html>/gi)];
+  if (closeMatches.length) {
+    const last = closeMatches.at(-1);
+    text = text.slice(0, last.index + last[0].length);
+  }
   return text;
 }
 

@@ -13,7 +13,7 @@ async function withImportFixture(run) {
   const root = await mkdtemp(path.join(os.tmpdir(), "ideaforge-import-fixture-"));
   try {
     await mkdir(path.join(root, "engine"));
-    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "engines.mjs"].map((name) =>
+    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "engines.mjs", "run-process.mjs"].map((name) =>
       copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
     const { importPages, serve } = await import(pathToFileURL(path.join(root, "engine", "forge.mjs")).href);
     const source = async (name, title, filename = "same.html") => {
