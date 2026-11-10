@@ -26,7 +26,8 @@ export async function resolveImagePath(input) {
   return "";
 }
 
-const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v1/scrape";
+// Firecrawl v1 stops working on 2026-12-10 15:00 UTC (HTTP 410); the v2 scrape response keeps data.markdown.
+const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape";
 
 function safePart(input, fallback = "input") {
   const cleaned = String(input || "")
