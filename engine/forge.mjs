@@ -933,7 +933,16 @@ async function serveStatic(req, res) {
     const info = await stat(resolvedFilePath);
     if (!info.isFile()) throw new Error("Not a file.");
     const body = await readFile(resolvedFilePath);
-    res.writeHead(200, { "Content-Type": contentType(resolvedFilePath), "Cache-Control": "no-store" });
+    // Imported/model-authored documents may run scripts, but must never share
+    // the Dashboard's origin and read private archives or its in-memory token.
+    // Check both names so a symlink cannot turn an untrusted route into a dashboard.
+    const isDashboard = relative === "index.html" && resolvedRelative === "index.html";
+    res.writeHead(200, {
+      "Content-Type": contentType(resolvedFilePath),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": `frame-ancestors 'none';${isDashboard ? "" : " sandbox allow-scripts;"}`,
+    });
     res.end(body);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });

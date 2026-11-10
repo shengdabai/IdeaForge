@@ -75,9 +75,21 @@ test("every engine receives the prompt on stdin, never as an argument", () => {
     assert.equal(invocation.input, prompt);
     assert.ok(invocation.args.every((arg) => arg.length < 256), `${engine} must not place the prompt in argv`);
   }
-  assert.deepEqual(engineInvocation("claude", "p").args, ["-p", "--output-format", "text", "--no-session-persistence"]);
   assert.deepEqual(engineInvocation("codex", "p", { outputFile: "/tmp/o" }).args.slice(-3), ["--output-last-message", "/tmp/o", "-"]);
   assert.throws(() => engineInvocation("gpt", "p"), /Unknown engine/u);
+});
+
+test("Claude text generation disables built-in and configured MCP tools", () => {
+  const { args } = engineInvocation("claude", "untrusted source content");
+  const option = (name) => args[args.indexOf(name) + 1];
+  assert.ok(args.includes("--tools"));
+  assert.equal(option("--tools"), "");
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.ok(args.includes("--mcp-config"));
+  assert.deepEqual(JSON.parse(option("--mcp-config")), { mcpServers: {} });
+  assert.equal(option("--disallowedTools"), "mcp__*");
+  assert.ok(args.includes("--no-session-persistence"));
+  assert.equal(option("--output-format"), "text");
 });
 
 test("run retries transient failures but stops at once when the CLI cannot start", async () => {

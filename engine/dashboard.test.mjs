@@ -105,3 +105,12 @@ test("a dashboard opened without its token says where the launcher shows the URL
   assert.match(message, /start-dashboard\.command/);
   assert.match(message, /终端/);
 });
+
+test("dashboard links reject executable URL schemes and control characters", async () => {
+  const context = await dashboardContext();
+  for (const value of ["javascript://example/%0Aalert(1)", "JaVaScRiPt://example/%0Aalert(1)",
+    "data://text/html,<script>alert(1)</script>", "vbscript://example/run", "java\nscript://example/run"]) {
+    context.inputPath = value;
+    assert.equal(vm.runInContext("hrefFor(inputPath)", context), "#", value);
+  }
+});

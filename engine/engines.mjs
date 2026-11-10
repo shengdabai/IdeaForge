@@ -46,7 +46,15 @@ export function engineInvocation(engineName, prompt, { outputFile = "" } = {}) {
         input: prompt,
       };
     case "claude":
-      return { command: "claude", args: ["-p", "--output-format", "text", "--no-session-persistence"], input: prompt };
+      // Generation needs only the supplied prompt. Source articles must not be
+      // able to invoke local commands, read files, or use configured MCP tools.
+      return {
+        command: "claude",
+        args: ["-p", "--output-format", "text", "--no-session-persistence",
+          "--tools", "", "--disallowedTools", "mcp__*",
+          "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'],
+        input: prompt,
+      };
     case "ollama": {
       const model = process.env.IDEAFORGE_OLLAMA_MODEL || process.env.OLLAMA_MODEL || "qwen3-coder:30b";
       return { command: "ollama", args: ["run", model, "--hidethinking"], input: prompt, model };
