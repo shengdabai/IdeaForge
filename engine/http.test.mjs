@@ -184,3 +184,43 @@ test("static routes reject sensitive filenames and symlinks into hidden files", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("untrusted static documents are sandboxed even through dashboard symlinks", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ideaforge-sandbox-fixture-"));
+  let server;
+  try {
+    await mkdir(path.join(root, "engine"));
+    await mkdir(path.join(root, "pages"));
+    await mkdir(path.join(root, "templates"));
+    await Promise.all(["forge.mjs", "ingest.mjs", "generate.mjs", "engines.mjs", "run-process.mjs"].map((name) =>
+      copyFile(new URL(`./${name}`, import.meta.url), path.join(root, "engine", name))));
+    const html = "<!DOCTYPE html><script>window.probe = true</script>";
+    await writeFile(path.join(root, "index.html"), html);
+    await writeFile(path.join(root, "pages", "untrusted.html"), html);
+    await writeFile(path.join(root, "templates", "golden.html"), html);
+    await symlink("../index.html", path.join(root, "pages", "dashboard.html"));
+    const fixture = await import(pathToFileURL(path.join(root, "engine", "forge.mjs")).href);
+    server = await fixture.serve({ port: 0, token: "synthetic-sandbox-token" });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const check = async (pathname, sandboxed) => {
+      const response = await fetch(`${base}${pathname}`);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      const policy = response.headers.get("content-security-policy") || "";
+      assert.match(policy, /frame-ancestors 'none'/);
+      assert.equal(policy.includes("sandbox allow-scripts"), sandboxed, pathname);
+      assert.doesNotMatch(policy, /allow-same-origin/);
+      assert.equal(await response.text(), html);
+    };
+    for (const pathname of ["/", "/index.html"]) await check(pathname, false);
+    for (const pathname of ["/pages/untrusted.html", "/templates/golden.html", "/pages/dashboard.html"]) {
+      await check(pathname, true);
+    }
+    await rm(path.join(root, "index.html"));
+    await symlink("pages/untrusted.html", path.join(root, "index.html"));
+    await check("/", true);
+  } finally {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
