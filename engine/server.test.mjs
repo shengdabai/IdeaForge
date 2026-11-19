@@ -5,12 +5,13 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { stripHtmlFence, validateHtml } from "./generate.mjs";
 import { __test__ as forgeInternals, serve } from "./forge.mjs";
 
 const execFileAsync = promisify(execFile);
-const engineDir = path.dirname(new URL(import.meta.url).pathname);
+const engineDir = path.dirname(fileURLToPath(import.meta.url));
 
 function closeServer(server) {
   return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
